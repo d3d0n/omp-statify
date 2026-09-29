@@ -1,13 +1,13 @@
 # Local inference on macOS
 
-Observed 2026-09-29 on Apple Silicon (base M4, 24 GB unified memory, macOS 27.0). Homebrew supplies inference engines and mise; this repository's [`mise.toml`](../mise.toml) pins `uv` and provides the Jeff setup/server tasks. Mise installs **only uv** for Jeff; the tasks use uv to install Python, dependencies and weights. Nothing here changes Statify, which still calls only Jev through OpenRouter. See [Jeff as a local Jev alternative](jeff.md), especially [protocol compatibility](jeff.md#protocol-compatibility-with-statify) and the [Apple M4 trial](jeff.md#local-trial-on-apple-m4). Commands below state whether they were exercised; Homebrew engine versions are observed metadata, not pinned installs.
+Observed 2026-09-29 on Apple Silicon (base M4, 24 GB unified memory, macOS 27.0). Homebrew supplies optional generic inference engines and mise; the installed Statify plugin includes [`mise.toml`](../mise.toml), which pins `uv` and provides Jeff setup/server tasks. Mise installs **only uv** for Jeff; uv installs Python, dependencies and weights. Statify supports an **experimental, explicit local Jeff provider**, defaulting to `shadow` rather than omission; Jev via OpenRouter remains the default provider. Installing the server neither starts it nor switches Statify on. See [Jeff research and quality limits](jeff.md) and the [architecture/privacy contract](architecture.md#modes-recovery-and-privacy). Commands below state whether they were exercised; Homebrew engine versions are observed metadata, not pinned installs. This describes repository integration, not a published release.
 
 ## Prerequisites
 
 | Tool | Channel | Observed 2026-09-29 | Purpose |
 |---|---|---|---|
 | Homebrew | Homebrew installation | 7.0.6 (`/opt/homebrew`) | Installs engines and optional system tools. |
-| mise | Homebrew | 2026.9.12 (`/opt/homebrew/bin/mise`) | Runs this repository's Jeff tasks, providing pinned uv without shell activation. |
+| mise | Homebrew | 2026.9.12 (`/opt/homebrew/bin/mise`) | Runs the installed plugin's Jeff tasks, providing pinned uv without shell activation. |
 | `uv` | mise (`mise.toml`) | 0.12.19 | Installs the Jeff runtime; uv itself enforces Jeff's [`required-version >=0.12.19`](https://github.com/firelex/jeff/blob/db4a13d8db0dc9bd84100b97498620b5f396e25c/pyproject.toml#L54-L56). Homebrew's uv 0.12.18 was too old. |
 | Python | uv (`uv python pin 3.14`) | uv-managed CPython 3.14.2 in the verified setup | uv downloads the 3.14 interpreter when needed; Jeff requires ≥3.12. |
 | Serving dependencies | uv (`uv.lock`) | 49 packages in the trial | `uv sync --locked --no-default-groups --extra mac` installs exactly the pinned serving and MLX dependencies. |
@@ -19,44 +19,41 @@ Jeff publishes 16-bit weight sizes of **1.7 GB** for Qwen3.5-0.8B, **4.2 GB** fo
 
 ## Jeff server
 
-From the **omp-statify checkout**, `mise install` installs the pinned uv; [`jeff:setup`](../mise.toml) clones or fetches Jeff into `${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}`, checks out `db4a13d8db0dc9bd84100b97498620b5f396e25c`, pins Python 3.14 with `uv python pin 3.14`, syncs the locked serving dependencies with `uv sync --locked --no-default-groups --extra mac`, and downloads `mstrasser/Jeff-Qwen3.5-0.8B` at `d66458d54426fcf52046b896261df8909bbc8b05` via `uv run --no-sync hf download … --local-dir checkpoints/jeff-0.8b`. No global Python, standalone `hf` or mise shell activation is required. `JEFF_DIR` can override the destination for both tasks; use the same override for setup and serving.
+After [installing Statify as an OMP plugin](setup.md#install-and-use-statify), start OMP and enter `/statify jeff setup`. It prints an absolute `mise trust '<installed-plugin-directory>/mise.toml'` command, then `mise -C … install uv`, `run jeff:setup` and `run jeff:serve` commands. Confirm you trust the installed package before running `mise trust`: mise rejects untrusted packaged tasks in non-interactive shells. Use the exact single-quoted path printed by your installation; the commands below use `/absolute/path/to/installed/omp-statify` as a **placeholder**, not a runnable path. The tasks run in the installed package directory, not the Jeff checkout. Statify never auto-installs Python or launches the ~2 GB server. To use a source checkout instead, substitute its absolute path in the same `mise -C` commands; do **not** load the installed plugin and `omp --extension ./src/index.ts` simultaneously.
 
-**Verified 2026-09-29 on Apple M4/macOS 27.0:** the complete `jeff:setup` task ran into an empty `/tmp/jeff-research/e2e` override in **245.07 s** (warm uv package cache), produced CPython 3.14.2, `.python-version` `3.14`, a **936 MB** `.venv`, a **1.7 GB** checkpoint and **2.8 GB** checkout. Git HEAD matched the pinned Jeff revision. An earlier manual cold-cache `uv sync` took **116.95 s** and an unpinned model download **158.11 s**; these are distinct observations, not a forecast for a fresh setup.
+[`jeff:setup`](../mise.toml) clones or fetches Jeff into `${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}`, checks out `db4a13d8db0dc9bd84100b97498620b5f396e25c`, pins Python 3.14 with `uv python pin 3.14`, syncs the locked serving dependencies with `uv sync --locked --no-default-groups --extra mac`, and downloads `mstrasser/Jeff-Qwen3.5-0.8B` at `d66458d54426fcf52046b896261df8909bbc8b05` via `uv run --no-sync hf download … --local-dir checkpoints/jeff-0.8b`. Setup contacts GitHub, PyPI/package hosts and Hugging Face; classification requests in Jeff mode stay on loopback. No Homebrew uv/Python, global Python, standalone `hf` or mise shell activation is required. `JEFF_DIR` can override the destination for both tasks; use the same override for setup and serving.
 
-**Not run separately in this fresh-install check:** `mise install` is the standard first-time prerequisite; `mise run jeff:setup` was verified using the pinned uv already installed on the test Mac.
-
-```sh
-mise install
-```
-
-**Verified 2026-09-29 on Apple M4/macOS 27.0: pinned setup task.**
+**Historical source-checkout trial, verified 2026-09-29 on Apple M4/macOS 27.0:** the complete `jeff:setup` task ran into an empty `/tmp/jeff-research/e2e` override in **245.07 s** (warm uv package cache), produced CPython 3.14.2, `.python-version` `3.14`, a **936 MB** `.venv`, a **1.7 GB** checkpoint and **2.8 GB** checkout. Git HEAD matched the pinned Jeff revision. An earlier manual cold-cache `uv sync` took **116.95 s** and an unpinned model download **158.11 s**; these are distinct observations, not a fresh install forecast. `mise install` was **not run separately** in this trial because uv was already installed; the installed-plugin commands below are the supported procedure, not claimed newly verified in that earlier trial.
 
 ```sh
-mise run jeff:setup
+# Replace the placeholder with the absolute installed-plugin path printed by /statify jeff setup.
+mise trust '/absolute/path/to/installed/omp-statify/mise.toml'
+mise -C '/absolute/path/to/installed/omp-statify' install uv
+mise -C '/absolute/path/to/installed/omp-statify' run jeff:setup
 ```
 
 ### MLX backend
 
 The MLX backend loads Qwen3.5 decision checkpoints, **not** Gemma. The default Jeff backend is PyTorch; [`jeff:serve`](../mise.toml) selects `JEFF_BACKEND=mlx`, `JEFF_CHECKPOINT=checkpoints/jeff-0.8b`, `JEFF_HOST=127.0.0.1` and `PORT=8765`, then runs `uv run --no-sync jeff-serve` inside the configured `JEFF_DIR`. `JEFF_API_KEY`, when set in the task's environment, passes through to Jeff. The published M4 **Max** 28 ms per short decision is not a base-M4/Statify latency measurement. [Backend restrictions](https://github.com/firelex/jeff/blob/db4a13d8db0dc9bd84100b97498620b5f396e25c/src/jeff/mlx_backend.py#L26-L33).
 
-**Verified 2026-09-29 on Apple M4/macOS 27.0:** from the omp-statify checkout, after setup with the same `JEFF_DIR`, the following task reached `/health` `ready`; the sample decision returned the results below. Keep the foreground server running and make the HTTP checks in another terminal.
+**Historical source-checkout trial, verified 2026-09-29 on Apple M4/macOS 27.0:** after setup with the same `JEFF_DIR`, the `jeff:serve` task reached `/health` `ready`; the sample decision returned the results below. From the installed plugin, run the `serve` command printed by `/statify jeff setup`, with its exact absolute package path. Keep this foreground server running and make HTTP/OMP checks in another terminal. **Statify does not start it for you.**
 
 ```sh
-mise run jeff:serve
+mise -C '/absolute/path/to/installed/omp-statify' run jeff:serve
 ```
 
 The earlier trial's warm-filesystem-cache *process restart* reached `/health` `ready` in about **9 s** (1-second timestamp resolution); its initial startup was not precisely timed. The later mise-task run also reached `ready` but was not timed as a cold start.
 
-**Not run: optional Qwen3.5-2B.** Inside the Jeff checkout, with uv supplied via `mise exec` from the omp-statify checkout, download `mstrasser/Jeff-Qwen3.5-2B` using `uv run --no-sync hf download mstrasser/Jeff-Qwen3.5-2B --revision 30824caa5f255df0086fecba5bdfa63374c4f758 --local-dir checkpoints/jeff-2b`, then launch Jeff with `JEFF_BACKEND=mlx JEFF_CHECKPOINT=checkpoints/jeff-2b JEFF_HOST=127.0.0.1 PORT=8765` and `uv run --no-sync jeff-serve`. The stock `jeff:serve` task deliberately selects 0.8B; stop that server before using port 8765 for another model.
+**Not run: optional Qwen3.5-2B.** In the Jeff checkout, with uv supplied by `mise -C '<absolute installed-plugin path>' exec --` (using the path printed by `/statify jeff setup`), download `mstrasser/Jeff-Qwen3.5-2B` using `uv run --no-sync hf download mstrasser/Jeff-Qwen3.5-2B --revision 30824caa5f255df0086fecba5bdfa63374c4f758 --local-dir checkpoints/jeff-2b`, then launch Jeff with `JEFF_BACKEND=mlx JEFF_CHECKPOINT=checkpoints/jeff-2b JEFF_HOST=127.0.0.1 PORT=8765` and `uv run --no-sync jeff-serve`. The stock `jeff:serve` task deliberately selects 0.8B; stop that server before using port 8765 for another model.
 
 ### PyTorch backend
 
 Gemma4-E2B needs PyTorch; Qwen also works under PyTorch. The setup task already installs PyTorch as a core dependency. Set `JEFF_DEVICE=mps` explicitly: on macOS Jeff otherwise chooses **CPU**, not MPS ([device selection](https://github.com/firelex/jeff/blob/db4a13d8db0dc9bd84100b97498620b5f396e25c/src/jeff/models.py#L31-L42)). Gemma's 9.3 GB of weights do not predict runtime memory or guarantee MPS kernel coverage. Stop the MLX server first.
 
-**Not run: Gemma4-E2B download and PyTorch MPS serving.** From the omp-statify checkout, `mise exec` supplies the pinned uv to a shell that enters the Jeff directory. The `JEFF_DIR` override, if used during setup, must be exported here too.
+**Not run: Gemma4-E2B download and PyTorch MPS serving.** Point `mise -C` at the absolute installed-plugin path printed by `/statify jeff setup` (or at the optional source checkout); `mise exec` supplies the pinned uv to a shell that enters the Jeff directory. The `JEFF_DIR` override, if used during setup, must be exported here too.
 
 ```sh
-mise exec -- sh -c '
+mise -C '/absolute/path/to/installed/omp-statify' exec -- sh -c '
   cd "${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}"
   uv run --no-sync hf download mstrasser/Jeff-Gemma4-E2B \
     --revision afcb75ae269494582aab3ec3cea0d278685a8cb2 \
@@ -78,6 +75,17 @@ curl -si http://127.0.0.1:8765/v1/models
 curl -i http://127.0.0.1:8765/v1/systemone -H 'content-type: application/json' -d '{"model":"jeff-latest","state":"Refund request: the customer says the parcel arrived crushed and wants their money back.","questions":{"route":{"type":"choice","instructions":"Which team should handle this?","criteria":{"1":"Refunds and payments","2":"Damaged or lost parcels","3":"Account and login problems"}},"angry":{"type":"noul","instructions":"Is the customer angry?"}}}'
 ```
 
+**Not run in the earlier standalone server trial: installed-plugin OMP check.** After `/health` reports `ready`, in OMP with the installed extension loaded and without entering any key into chat, run:
+
+```text
+/statify status
+/statify provider jeff
+/statify on
+/statify status
+```
+
+The first status should show `off` and default provider `jev` for a new profile; the second should show `on`, provider `jeff` and local endpoint `http://127.0.0.1:8765`. Check Jeff readiness separately with the `/health` curl above. Selection alone never turns it on. No OpenRouter key is needed in Jeff mode; if the server sets `JEFF_API_KEY`, `/statify jeff-key add` prints the installed manager command to enter that secret interactively in a terminal, and status reports its presence without printing it. Use `/statify jeff-url http://127.0.0.1:8765` only to change the endpoint to a valid HTTP `127.0.0.1` address with an explicit port; remote URLs are rejected. Jeff defaults to `shadow`, so this sequence does **not** omit context; only a separate OMP session started explicitly with `--statify-mode=replace` allows experimental local omission, which is **not validated as safe**. See [architecture](architecture.md#modes-recovery-and-privacy).
+
 The observed health body was `{"status":"ready","model":"jeff-qwen3.5-0.8b","checkpoint":"checkpoints/jeff-0.8b","max_options":26,"authentication":false,"modalities":["text"]}`. `/v1/models` listed `jeff`, `jeff-latest`, `jeff-qwen3.5-0.8b` and `jeff-qwen3.8-27b`. The sample returned `answers.route.choice=\"2\"`, `answers.angry.noul=0.7537011132747267`, `usage.input_tokens=222` and `usage.output_tokens=0`. The trial's unchanged `statifyResult` request sent locally failed **422** for its `typesafe/jev-1.13` model id; with only the model id switched to `jeff-latest` in a diagnostic fetcher, the same parser returned real replacements for three source/history inputs. This is compatibility evidence, not accuracy validation; see the [trial results](jeff.md#local-trial-on-apple-m4).
 
 The separately restarted, authenticated trial server returned `/health` `200` with `authentication:true`. **Verified 2026-09-29 on Apple M4/macOS 27.0: invalid-bearer check** against that server (`JEFF_API_KEY=dummy-key` in this throwaway trial): the request below returned `401` and `{"detail":"Missing or invalid API key."}`. Do not use `dummy-key` for a real service.
@@ -93,16 +101,16 @@ curl -sS -i http://127.0.0.1:8765/v1/models \
   -H "Authorization: Bearer ${JEFF_API_KEY:?export the server key first}"
 ```
 
-A 401 means a missing/invalid bearer key; 422 means invalid request data (including Statify's current `typesafe/jev-1.13` model id); 503 means the model is not ready; 529 means another request holds Jeff's shared inference lock (`Retry-After: 1`). Neither HTTP schema compatibility nor a successful standalone `curl` means Statify currently supports Jeff; see [protocol compatibility](jeff.md#protocol-compatibility-with-statify).
+A 401 means a missing/invalid bearer key; 422 means invalid request data (a historical unmodified Jev request with `typesafe/jev-1.13` failed this way); 503 means the model is not ready; 529 means another request holds Jeff's shared inference lock (`Retry-After: 1`). Statify's Jeff provider sends `jeff-latest`, checks `/health`, serializes local decisions, and fails open to original text on loading/unreachable health, 503/529/422, timeout or invalid answers. Successful standalone `curl` confirms the server route, **not Jeff's omission quality**; see [protocol compatibility](jeff.md#protocol-compatibility-with-statify).
 
 ### Run as a LaunchAgent
 
-`brew services` manages Homebrew formulae, not this cloned Python server. This LaunchAgent runs `jeff:serve` through `/opt/homebrew/bin/mise -C <absolute omp-statify checkout>`, so the task supplies the pinned uv without mise shell activation. Run the following from the **omp-statify checkout** after `jeff:setup`; keep `JEFF_DIR` aligned with setup if overridden. Logs live under `~/Library/Logs/Jeff`. The task binds only loopback and sets no API key; to enable auth, add a protected `JEFF_API_KEY` under `EnvironmentVariables` and send its bearer header. Plists store environment values in plaintext: restrict permissions/backups and stop the service before editing. [launchd plist keys](https://keith.github.io/xcode-man-pages/launchd.plist.5.html).
+`brew services` manages Homebrew formulae, not this cloned Python server. This LaunchAgent runs `jeff:serve` through `/opt/homebrew/bin/mise -C <absolute installed-plugin package directory>`, so the task supplies pinned uv without mise shell activation. After `jeff:setup`, replace `STATIFY_DIR` in the example with the absolute directory printed by `/statify jeff setup` (or an absolute source-checkout directory); keep `JEFF_DIR` aligned with setup if overridden. Logs live under `~/Library/Logs/Jeff`. The task binds only loopback and sets no API key; to enable auth, add a protected `JEFF_API_KEY` under `EnvironmentVariables` and set the matching separate Statify Jeff key. Plists store environment values in plaintext: restrict permissions/backups and stop the service before editing. [launchd plist keys](https://keith.github.io/xcode-man-pages/launchd.plist.5.html).
 
-**Partly verified 2026-09-29 on Apple M4/macOS 27.0:** the generated plist passes `plutil -lint`. Its `ProgramArguments` command, run in a launchd-like minimal environment (`env -i` with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`), reached `/health` `ready`. `launchctl` bootstrap/kickstart were **not run**.
+**Historical source-checkout trial, partly verified 2026-09-29 on Apple M4/macOS 27.0:** the generated plist passed `plutil -lint`. Its `ProgramArguments` command, run in a launchd-like minimal environment (`env -i` with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`), reached `/health` `ready`. `launchctl` bootstrap/kickstart were **not run**; a plist pointing at an installed-plugin path was not separately tested.
 
 ```sh
-STATIFY_DIR="$(pwd -P)"
+STATIFY_DIR="/absolute/path/to/installed/omp-statify"  # Replace with the absolute path from /statify jeff setup.
 JEFF_DIR="${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}"
 JEFF_LOG="$HOME/Library/Logs/Jeff"
 JEFF_PLIST="$HOME/Library/LaunchAgents/local.jeff.plist"
@@ -154,10 +162,10 @@ rm -rf "$HOME/Library/Logs/Jeff"
 rm -rf "${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}"
 ```
 
-The default shared Hugging Face cache is `~/.cache/huggingface/hub` (and Xet content may be in `~/.cache/huggingface/xet`); inspect it before removing only this model's entries. **Not run: optional shared-cache deletion**—`uv cache clean` deletes the cache used by **all** uv projects, not just Jeff; do not run it for an ordinary Jeff uninstall. From the omp-statify checkout:
+The default shared Hugging Face cache is `~/.cache/huggingface/hub` (and Xet content may be in `~/.cache/huggingface/xet`); inspect it before removing only this model's entries. **Not run: optional shared-cache deletion**—`uv cache clean` deletes the cache used by **all** uv projects, not just Jeff; do not run it for an ordinary Jeff uninstall. Supply the installed-plugin directory printed by `/statify jeff setup`:
 
 ```sh
-mise exec -- uv cache clean
+mise -C '/absolute/path/to/installed/omp-statify' exec -- uv cache clean
 ```
 
 ## Generic engines via Homebrew
@@ -216,7 +224,7 @@ All versions are Homebrew metadata observed 2026-09-29; only the Jeff trial, if 
 
 | Server | Package / service | Local default API | Probability access | Qwen3.5 / Gemma 4 | Jeff checkpoint and decision API |
 |---|---|---|---|---|---|
-| Jeff | Pinned source; LaunchAgent example, not a Homebrew service | `127.0.0.1:8000` (`8765` above), `/v1/systemone` | Calibrated decision probabilities from trained readout | Qwen MLX/PyTorch; Gemma PyTorch only | Native Jeff; Statify still needs adapter/config changes |
+| Jeff | Pinned source via installed-plugin mise tasks; LaunchAgent example, not a Homebrew service | `127.0.0.1:8000` (`8765` above), `/v1/systemone` | Decision probabilities from trained readout; task-specific calibration unproven | Qwen MLX/PyTorch; Gemma PyTorch only | Native Jeff; experimental Statify adapter with shadow default |
 | llama.cpp | Formula 0.5.0; no brew service | `:8080`, `/completion`, `/v1/chat/completions` | Top generated-token probabilities | Both after supported GGUF conversion | No |
 | Ollama | Formula 0.34.4; brew service | `:11434`, `/api/generate`, `/v1/chat/completions` | Native logprobs, top 20; OpenAI support to verify | Both base families | No |
 | MLX-LM | Formula 0.31.3; brew service | `:8080`, `/v1/chat/completions` | Generated-token `top_logprobs` ≤11 | Both text base families | No |

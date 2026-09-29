@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-`omp-statify` is a Bun/TypeScript Oh-my-pi (OMP) extension. With explicit opt-in and an OpenRouter key, it asks Jev to select useful chunks from large tool results and earlier plain-text assistant context. It keeps exact originals locally for recovery; it does not rewrite user prompts or instructions. It starts disabled. See `README.md` and `docs/architecture.md` before changing filtering or privacy behavior.
+`omp-statify` is a Bun/TypeScript Oh-my-pi (OMP) extension. With explicit opt-in, it asks Jev through OpenRouter (requires a separate key) or experimental locally served Jeff (no OpenRouter key) to select useful chunks from large tool results and earlier plain-text assistant context. It keeps exact originals locally for recovery; it does not rewrite user prompts or instructions. It starts disabled; Jev defaults to replace, Jeff to shadow unless OMP explicitly launches `--statify-mode=replace`. Jeff omission quality remains unvalidated. See `README.md` and `docs/architecture.md` before changing filtering or privacy behavior.
 
 ## Architecture & Data Flow
 
 - `src/index.ts` exports the OMP extension. `session_start`/`turn_start` refresh state; `tool_result` processes eligible text blocks; `context` processes eligible earlier single-text-block assistant messages. The latest user task supplies classification context. Never filter recovery-tool output.
-- Eligible text is split on preferred structural/line boundaries (at most 1,800 UTF-16 code units per chunk, 12 chunks). Jev is called through OpenRouter; uncertain answers, failed requests, bypasses, and replacements that do not reduce both characters and estimated tokens retain the original. `record` preserves text without network calls; `shadow` classifies without replacing; `replace` can shorten it.
+- Eligible text is split on preferred structural/line boundaries (at most 1,800 UTF-16 code units per chunk, 12 chunks). Default Jev calls OpenRouter; experimental Jeff calls only a user-started loopback server. Uncertain answers, failed requests, bypasses, and replacements that do not reduce both characters and estimated tokens retain the original. `record` preserves text without network calls; `shadow` classifies without replacing; `replace` can shorten it, but Jeff requires an explicit launch override.
 - Before a `replace` request, the original is archived. Receipts identify shown/omitted **1-based inclusive UTF-16 offsets**, UUID, and hash; the registered `xd://statify_read` tool retrieves exact archived spans (at most 8,000 UTF-16 units). File-backed sessions use a `.statify` directory beside the session; ephemeral archives are cleaned on shutdown.
 - `src/settings.ts` owns profile-scoped settings/key persistence shared by the extension and `src/manage.ts` CLI. The extension uses session-scoped archives and a bounded promise cache for assistant-context classification. Keep fail-open behavior for classification, but do not silently accept corrupt settings or insecure keys.
 
@@ -30,8 +30,8 @@ mise run smoke         # launches OMP RPC and verifies extension/recovery-tool l
 omp --extension ./src/index.ts  # local development; do not also load installed plugin
 bun src/manage.ts status
 bun bench/run.ts --limit 1       # offline synthetic benchmark
-mise install && mise run jeff:setup  # experimental: pinned local Jeff (uv 0.12.19, Python 3.14, uv.lock) in $JEFF_DIR
-mise run jeff:serve                  # Jeff MLX server on 127.0.0.1:8765; see docs/local-inference.md
+mise install && mise run jeff:setup  # source checkout: pinned uv/Python/locked Jeff dependencies
+mise run jeff:serve                  # source checkout: separate foreground server on 127.0.0.1:8765
 ```
 
 `package.json` has no scripts or build step; TypeScript is checked with `noEmit`. The live benchmark requires `--live --jev-only` or `--live --model provider/model-id` plus `OPENROUTER_API_KEY`; read `docs/benchmarks.md` before using provider calls.
@@ -50,13 +50,14 @@ mise run jeff:serve                  # Jeff MLX server on 127.0.0.1:8765; see do
 - `src/settings.ts`, `src/manage.ts`: profile settings/key and CLI management.
 - `mise.toml`, `tsconfig.json`, `bun.lock`: task commands, strict no-emit compiler options, locked dependencies.
 - `docs/architecture.md`, `docs/setup.md`, `docs/benchmarks.md`: behavioral/privacy contract, local loading, evidence limitations.
-- `docs/jeff.md`, `docs/local-inference.md`: Jeff (local Jev alternative, not yet supported) research and macOS Homebrew/mise inference setup.
+- `docs/jeff.md`, `docs/local-inference.md`: dated Jeff research and macOS inference details; Jeff is now selectable experimentally, but published benchmarks are not quality validation for Statify.
 
 ## Runtime/Tooling Preferences
 
 - Use Bun 1.4.2 via `mise.toml` (package minimum `>=1.4.2`), Bun's frozen lockfile install, and OMP for extension execution. Do not assume Node/npm scripts or transpiled build output.
-- Python tooling (experimental Jeff tasks only): mise installs just `uv` (pinned in `mise.toml`); uv pins Python (`uv python pin`) and dependencies (`uv sync --locked`). Do not install uv or Python through Homebrew; Homebrew is for inference engines.
-- Installed plugin discovery loads `src/index.ts` automatically; local `omp --extension ./src/index.ts` is an alternative, not an additional loading path. Settings and plaintext key live in the active OMP agent/profile directory (`PI_CODING_AGENT_DIR` can override it); do not print keys or enable external transmission without consent.
+- Python tooling (experimental Jeff tasks only): Homebrew installs mise on Apple Silicon; mise installs just `uv` (pinned in published `mise.toml`); uv pins Python (`uv python pin`) and dependencies (`uv sync --locked`). Do not install uv or Python through Homebrew; Homebrew is for inference engines. `/statify jeff setup` gives installed-plugin absolute mise commands, with no source checkout required; run `jeff:serve` separately and check `/health` ready.
+- Packaged mise configs may be untrusted in `node_modules`; `/statify jeff setup` prints a `mise trust <absolute-mise.toml>` command before install/serve tasks. The user must decide to trust the installed plugin; do not bypass trust automatically.
+- Installed plugin discovery loads `src/index.ts` automatically; local `omp --extension ./src/index.ts` is an alternative, not an additional loading path. Settings and separate plaintext Jev/Jeff keys live in the active OMP agent/profile directory (`PI_CODING_AGENT_DIR` can override it); do not print keys or enable external transmission without consent. Jeff's local data and untrusted inputs still require care; `--statify-mode=replace` is experimental, not proven safe.
 
 ## Testing & QA
 

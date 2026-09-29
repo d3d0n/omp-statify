@@ -498,3 +498,101 @@ test("Unicode boundaries reject half a surrogate, accept exact whole range", asy
 		"splits a Unicode character",
 	);
 });
+
+test("Jeff accepts a local unauthenticated decision and preserves the archive", async () => {
+	const dir = await archive();
+	let observation:
+		| Parameters<NonNullable<Parameters<typeof statifyResult>[1]["observe"]>>[0]
+		| undefined;
+	const result = await statifyResult(tool(longText), {
+		archive: dir,
+		task: "Find repair order",
+		provider: "jeff",
+		consent: true,
+		mode: "replace",
+		observe: (value) => {
+			observation = value;
+		},
+		fetcher: async (url, init) => {
+			expect(url).toBe("http://127.0.0.1:8765/v1/systemone");
+			expect(init.method).toBe("POST");
+			expect(init.headers).toEqual({ "Content-Type": "application/json" });
+			const body = JSON.parse(init.body as string);
+			expect(body.model).toBe("jeff-latest");
+			expect(body.state).toEqual({ task: "Find repair order" });
+			expect(body.questions.chunk_1.criteria.true).toContain("exact data");
+			expect((await readdir(dir)).length).toBe(1);
+			return new Response(
+				JSON.stringify({
+					answers: Object.fromEntries(
+						[0.01, 0.99, 0.01].map((noul, i) => [
+							`chunk_${i}`,
+							{ type: "noul", noul },
+						]),
+					),
+					usage: { input_tokens: 120, output_tokens: 0 },
+				}),
+			);
+		},
+	});
+	if (!result) throw new Error("Jeff should omit irrelevant chunks");
+	expect(result.content[0].text).toContain("IMPORTANT: invoke repair()");
+	expect(result.content[0].text).not.toContain(
+		"irrelevant log line\n".repeat(100),
+	);
+	const id = /statify archive ([\da-f-]+)/.exec(result.content[0].text)?.[1];
+	if (!id) throw new Error("Missing recovery ID");
+	expect(await readArchive(dir, id, `1-${longText.length}`)).toBe(longText);
+	expect(observation?.status).toBe("replaced");
+	expect(observation?.usage).toEqual({
+		inputTokens: 120,
+		outputTokens: 0,
+		costUsd: undefined,
+	});
+});
+
+test("Jeff key is optional, invalid endpoint or answer fails open", async () => {
+	const dir = await archive();
+	const base = {
+		archive: dir,
+		task: "Find repair order",
+		provider: "jeff" as const,
+		consent: true,
+		mode: "replace" as const,
+	};
+	let calls = 0;
+	expect(
+		await statifyResult(tool(longText), {
+			...base,
+			jeffUrl: "https://external.example:8765",
+			fetcher: async () => {
+				calls++;
+				throw new Error("No external requests permitted");
+			},
+		}),
+	).toBeUndefined();
+	expect(calls).toBe(0);
+	expect(await readdir(dir)).toEqual([]);
+	for (const response of [
+		new Response("busy", { status: 529 }),
+		new Response(
+			JSON.stringify({ answers: { chunk_0: { type: "noul", noul: 0.01 } } }),
+		),
+	]) {
+		expect(
+			await statifyResult(tool(longText), {
+				...base,
+				key: "local-secret",
+				fetcher: async (url, init) => {
+					expect(url).toBe("http://127.0.0.1:8765/v1/systemone");
+					expect(init.headers).toEqual({
+						"Content-Type": "application/json",
+						Authorization: "Bearer local-secret",
+					});
+					return response;
+				},
+			}),
+		).toBeUndefined();
+		expect(await readdir(dir)).toEqual([]);
+	}
+});
