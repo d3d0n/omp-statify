@@ -16,7 +16,7 @@
 - `src/`: extension, management CLI, shared settings/key storage.
 - `tests/`: Bun behavior tests for filtering/recovery, settings/CLI, and benchmarks.
 - `bench/`: RepoQA case preparation (`cases.ts`) and offline/live benchmark runner (`run.ts`).
-- `docs/`: setup, architecture/privacy limits, and benchmark methodology.
+- `docs/`: setup, architecture/privacy limits, benchmark methodology, and Jeff/local-inference research.
 
 ## Development Commands
 
@@ -30,6 +30,8 @@ mise run smoke         # launches OMP RPC and verifies extension/recovery-tool l
 omp --extension ./src/index.ts  # local development; do not also load installed plugin
 bun src/manage.ts status
 bun bench/run.ts --limit 1       # offline synthetic benchmark
+mise install && mise run jeff:setup  # experimental: pinned local Jeff (uv 0.12.19, Python 3.14, uv.lock) in $JEFF_DIR
+mise run jeff:serve                  # Jeff MLX server on 127.0.0.1:8765; see docs/local-inference.md
 ```
 
 `package.json` has no scripts or build step; TypeScript is checked with `noEmit`. The live benchmark requires `--live --jev-only` or `--live --model provider/model-id` plus `OPENROUTER_API_KEY`; read `docs/benchmarks.md` before using provider calls.
@@ -48,10 +50,12 @@ bun bench/run.ts --limit 1       # offline synthetic benchmark
 - `src/settings.ts`, `src/manage.ts`: profile settings/key and CLI management.
 - `mise.toml`, `tsconfig.json`, `bun.lock`: task commands, strict no-emit compiler options, locked dependencies.
 - `docs/architecture.md`, `docs/setup.md`, `docs/benchmarks.md`: behavioral/privacy contract, local loading, evidence limitations.
+- `docs/jeff.md`, `docs/local-inference.md`: Jeff (local Jev alternative, not yet supported) research and macOS Homebrew/mise inference setup.
 
 ## Runtime/Tooling Preferences
 
 - Use Bun 1.4.2 via `mise.toml` (package minimum `>=1.4.2`), Bun's frozen lockfile install, and OMP for extension execution. Do not assume Node/npm scripts or transpiled build output.
+- Python tooling (experimental Jeff tasks only): mise installs just `uv` (pinned in `mise.toml`); uv pins Python (`uv python pin`) and dependencies (`uv sync --locked`). Do not install uv or Python through Homebrew; Homebrew is for inference engines.
 - Installed plugin discovery loads `src/index.ts` automatically; local `omp --extension ./src/index.ts` is an alternative, not an additional loading path. Settings and plaintext key live in the active OMP agent/profile directory (`PI_CODING_AGENT_DIR` can override it); do not print keys or enable external transmission without consent.
 
 ## Testing & QA

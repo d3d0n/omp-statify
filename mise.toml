@@ -1,5 +1,6 @@
 [tools]
 bun = "1.4.2"
+uv = "0.12.19"
 
 [settings]
 auto_install = false
@@ -29,4 +30,24 @@ if (code !== 0 || !frames.some(frame => frame.type === "ready") || !frames.some(
 }
 console.log("OMP loaded statify_read through src/index.ts");
 '
+'''
+
+[tasks."jeff:setup"]
+description = "Install the pinned local Jeff server (experimental Jev alternative) with uv"
+run = '''
+set -eu
+dir="${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}"
+if [ -d "$dir/.git" ]; then git -C "$dir" fetch --quiet origin; else git clone --quiet https://github.com/firelex/jeff.git "$dir"; fi
+git -C "$dir" checkout --quiet db4a13d8db0dc9bd84100b97498620b5f396e25c
+cd "$dir"
+uv python pin 3.14
+uv sync --locked --no-default-groups --extra mac
+uv run --no-sync hf download mstrasser/Jeff-Qwen3.5-0.8B --revision d66458d54426fcf52046b896261df8909bbc8b05 --local-dir checkpoints/jeff-0.8b
+'''
+
+[tasks."jeff:serve"]
+description = "Run the local Jeff server (MLX, Jeff-Qwen3.5-0.8B) on 127.0.0.1:8765"
+run = '''
+cd "${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}"
+JEFF_BACKEND=mlx JEFF_CHECKPOINT=checkpoints/jeff-0.8b JEFF_HOST=127.0.0.1 PORT=8765 exec uv run --no-sync jeff-serve
 '''

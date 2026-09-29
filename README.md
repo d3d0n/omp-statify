@@ -31,6 +31,8 @@ The replay places captured tool output in a user message; **it is not a real age
 - [Install, configure, disable, and remove the key](docs/setup.md)
 - [Filtering, recovery, privacy, and limits](docs/architecture.md)
 - [Benchmark methodology and provider-reported costs](docs/benchmarks.md)
+- [Jeff research: an experimental local alternative to Jev (not supported yet)](docs/jeff.md)
+- [Local inference on macOS with Homebrew](docs/local-inference.md)
 
 ## TODO
 
