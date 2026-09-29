@@ -8,9 +8,11 @@ Statify starts **off**. Enabling it with its own OpenRouter key selects `replace
 
 ## Quick start
 
-Requires the [OMP CLI](https://github.com/can1357/oh-my-pi#install) and [mise](https://mise.jdx.dev/getting-started.html). From a checkout of this repository:
+Requires the [OMP CLI](https://github.com/can1357/oh-my-pi#install) and [mise](https://mise.jdx.dev/getting-started.html):
 
 ```sh
+git clone https://github.com/d3d0n/omp-statify.git
+cd omp-statify
 mise install bun@1.4.2
 mise run install
 bun src/manage.ts key add  # hidden input; never pass the key as an argument

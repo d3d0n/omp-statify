@@ -1,8 +1,10 @@
 # Install and use Statify
 
-Statify is a source extension for [Oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi), not a published OMP package. Install the OMP CLI using its [official instructions](https://github.com/can1357/oh-my-pi#install), and install [mise](https://mise.jdx.dev/getting-started.html). From a checkout of this repository:
+Statify is a source extension for [Oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi), not a published OMP package. Install the OMP CLI using its [official instructions](https://github.com/can1357/oh-my-pi#install), and install [mise](https://mise.jdx.dev/getting-started.html):
 
 ```sh
+git clone https://github.com/d3d0n/omp-statify.git
+cd omp-statify
 mise install bun@1.4.2
 mise run install
 mise run smoke
