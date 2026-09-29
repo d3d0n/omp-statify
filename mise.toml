@@ -1,0 +1,32 @@
+[tools]
+bun = "1.4.2"
+
+[settings]
+auto_install = false
+
+[tasks.install]
+run = "bun install --frozen-lockfile"
+
+[tasks.check]
+run = "bunx biome check ."
+
+[tasks.typecheck]
+run = "bunx tsc --noEmit"
+
+[tasks.test]
+run = "bun test"
+
+[tasks.smoke]
+run = '''
+bun -e '
+const p = Bun.spawn(["omp", "--mode", "rpc", "--no-ui", "--no-session", "-e", "src/index.ts"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+p.stdin.write(JSON.stringify({ id: "smoke", type: "get_state" }) + "\n");
+p.stdin.end();
+const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+const frames = stdout.trim().split("\n").map(line => JSON.parse(line));
+if (code !== 0 || !frames.some(frame => frame.type === "ready") || !frames.some(frame => frame.type === "response" && frame.command === "get_state" && frame.success && JSON.stringify(frame.data?.systemPrompt).includes("xd://statify_read"))) {
+  throw new Error(`OMP extension launch failed (exit ${code}): ${stderr.slice(0, 1000)}`);
+}
+console.log("OMP loaded statify_read through src/index.ts");
+'
+'''

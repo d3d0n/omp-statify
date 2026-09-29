@@ -1,0 +1,426 @@
+import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { countTokens } from "@oh-my-pi/pi-natives";
+import { readArchive, statifyReceipt, statifyResult } from "../src/index";
+
+const dirs: string[] = [];
+afterEach(async () => {
+	await Promise.all(
+		dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+	);
+});
+async function archive() {
+	const dir = await mkdtemp(join(tmpdir(), "statify-test-"));
+	dirs.push(dir);
+	return dir;
+}
+const tool = (
+	text: string,
+	toolName = "read",
+	isError = false,
+	path = "src/main.ts",
+) => ({
+	toolName,
+	input: { path },
+	isError,
+	content: [{ type: "text" as const, text }],
+});
+const longText = `${"irrelevant log line\n".repeat(110)}IMPORTANT: invoke repair() before restart\n${"irrelevant log line\n".repeat(110)}`;
+
+function decisions(
+	scores: number[],
+	inspect?: (body: {
+		model: string;
+		state: unknown;
+		questions: Record<
+			string,
+			{ instructions: string; criteria: Record<string, string> }
+		>;
+	}) => Promise<void>,
+) {
+	return async (url: string, init: RequestInit) => {
+		expect(url).toBe("https://openrouter.ai/api/alpha/decisions");
+		const body = JSON.parse(init.body as string);
+		await inspect?.(body);
+		return new Response(
+			JSON.stringify({
+				answers: Object.fromEntries(
+					scores.map((noul, i) => [`chunk_${i}`, { type: "noul", noul }]),
+				),
+			}),
+			{ status: 200 },
+		);
+	};
+}
+
+test("archives before request, selects verbatim fragments, and restores omitted output after restart", async () => {
+	const dir = await archive();
+	const store = join(dir, "session.jsonl.statify");
+	let calls = 0;
+	const fetcher = decisions([0.01, 0.99, 0.01], async (body) => {
+		calls++;
+		expect(body.model).toBe("typesafe/jev-1.13");
+		expect(body.state).toEqual({ task: "Find repair order" });
+		expect(Object.keys(body.questions)).toEqual([
+			"chunk_0",
+			"chunk_1",
+			"chunk_2",
+		]);
+		expect(body.questions.chunk_1.instructions).toContain(
+			"IMPORTANT: invoke repair()",
+		);
+		expect(body.questions.chunk_1.criteria.true).toContain("exact data");
+		// The full extension-visible text must already be durable before the outbound request.
+		const [file] = await readdir(store);
+		if (!file) throw new Error("Archive missing before classification");
+		expect(
+			await readArchive(
+				store,
+				file.replace(/\.txt$/, ""),
+				`1-${longText.length}`,
+			),
+		).toBe(longText);
+	});
+	const result = await statifyResult(tool(longText), {
+		archive: store,
+		task: "Find repair order",
+		key: "test-key",
+		consent: true,
+		mode: "replace",
+		fetcher,
+	});
+	expect(calls).toBe(1);
+	if (!result) throw new Error("Expected a selected result");
+	const receipt = result.content[0].text;
+	expect(receipt).toContain("IMPORTANT: invoke repair()");
+	expect(receipt).toContain("Shown: ");
+	expect(receipt).toContain("Omitted: ");
+	expect(receipt).not.toContain(longText);
+	const id = /statify archive ([\da-f-]+)/.exec(receipt)?.[1];
+	if (!id) throw new Error("Receipt missing archive ID");
+	expect(receipt).toContain(
+		createHash("sha256").update(longText).digest("hex"),
+	);
+	// A fresh reader, independent of the handler's process state, can retrieve the exact text.
+	const parts: string[] = [];
+	for (let start = 1; start <= longText.length; start += 8_000) {
+		parts.push(
+			await readArchive(
+				store,
+				id,
+				`${start}-${Math.min(longText.length, start + 7_999)}`,
+			),
+		);
+	}
+	expect(parts.join("")).toBe(longText);
+	await expect(
+		readArchive(join(dir, "other-session.jsonl.statify"), id, "1-5"),
+	).rejects.toThrow();
+	await expect(readArchive(store, "../other-session", "1-5")).rejects.toThrow(
+		"Invalid archive ID",
+	);
+	await expect(readArchive(store, id, "1-8001")).rejects.toThrow(
+		"at most 8000",
+	);
+	await expect(
+		readArchive(store, id, `1-${longText.length + 1}`),
+	).rejects.toThrow("exceeds archive length");
+});
+
+test("irrelevant chunks are omitted without hiding an uncertain answer or OMP read provenance", async () => {
+	const dir = await archive();
+	const header = "[/tmp/project/src/repair.ts#AB12]\n";
+	const gold = "101: export function repair(): void { restart(); }\n";
+	const text = [
+		header,
+		Array.from({ length: 100 }, (_, i) => `${i + 1}: unrelated setup\n`).join(
+			"",
+		),
+		gold,
+		Array.from(
+			{ length: 100 },
+			(_, i) => `${i + 102}: relevant context\n`,
+		).join(""),
+		Array.from({ length: 109 }, (_, i) => `${i + 202}: unrelated tail\n`).join(
+			"",
+		),
+		"311: LAST unrelated tail\n",
+	].join("");
+	const original = tool(text);
+	const result = await statifyResult(original, {
+		archive: dir,
+		task: "Find repair order",
+		key: "test-key",
+		consent: true,
+		mode: "replace",
+		fetcher: decisions([0.15, 0.5, 0.5, 0.01]),
+	});
+	if (!result) throw new Error("Expected omitted chunks");
+	const display = result.content[0].text;
+	expect(display).toContain(header);
+	expect(display).toContain(gold);
+	expect(display).not.toContain("\n1: unrelated setup\n");
+	expect(display).not.toContain("311: LAST unrelated tail");
+	expect(display.length).toBeLessThan(text.length);
+	expect(display).toContain(`Shown: 1-${header.length}, `);
+	expect(original.content[0].text).toBe(text);
+	const id = /statify archive ([\da-f-]+)/.exec(display)?.[1];
+	if (!id) throw new Error("Receipt missing archive ID");
+	const parts: string[] = [];
+	for (let start = 1; start <= text.length; start += 8_000)
+		parts.push(
+			await readArchive(
+				dir,
+				id,
+				`${start}-${Math.min(text.length, start + 7_999)}`,
+			),
+		);
+	expect(parts.join("")).toBe(text);
+});
+
+test("a numbered Python declaration stays with its decorator, docstring, and body", async () => {
+	const header = "[/tmp/fixture.py#ABCD]\n";
+	const prefix = Array.from(
+		{ length: 60 },
+		(_, i) => `${i + 1}: setting_${i}=lookup(value)\n`,
+	).join("");
+	const block = [
+		"61:",
+		"62:@trace",
+		"63:def target() -> str:",
+		'64:    """Handle the target request."""',
+		'65:    return "ok"',
+		"66:",
+		"",
+	].join("\n");
+	const tail = Array.from(
+		{ length: 120 },
+		(_, i) => `${i + 67}: unrelated_${i}=lookup(value)\n`,
+	).join("");
+	const text = header + prefix + block + tail;
+	let inspected = false;
+	await statifyResult(tool(text), {
+		archive: await archive(),
+		task: "Find target",
+		key: "test-key",
+		consent: true,
+		mode: "shadow",
+		fetcher: decisions([0.5, 0.5, 0.5, 0.5], async (body) => {
+			inspected = true;
+			const chunks = Object.values(body.questions).map((q) => q.instructions);
+			const target = chunks.find((chunk) => chunk.includes("def target()"));
+			expect(chunks).toHaveLength(4);
+			expect(chunks[0]).not.toContain("@trace");
+			expect(target).toContain("@trace");
+			expect(target).toContain('"""Handle the target request."""');
+			expect(target).toContain('return "ok"');
+		}),
+	});
+	expect(inspected).toBe(true);
+});
+
+test("all-low chunks still have a receipt; shadow and non-shrinking results leave no archive", async () => {
+	const dir = await archive();
+	const text = "not task data\n".repeat(300);
+	const base = {
+		archive: dir,
+		task: "Find repair order",
+		key: "test-key",
+		consent: true,
+		mode: "replace" as const,
+	};
+	const none = await statifyResult(tool(text), {
+		...base,
+		fetcher: decisions([0.02, 0.02, 0.02]),
+	});
+	expect(none?.content[0].text).toContain(`Omitted: 1-${text.length}`);
+	expect(none?.content[0].text).toContain("Shown: none");
+	const shadow = join(dir, "shadow");
+	expect(
+		await statifyResult(tool(text), {
+			...base,
+			archive: shadow,
+			mode: "shadow",
+			fetcher: decisions([0.02, 0.99, 0.02]),
+		}),
+	).toBeUndefined();
+	await expect(readdir(shadow)).rejects.toThrow();
+	const noOp = join(dir, "no-op");
+	expect(
+		await statifyResult(tool("x".repeat(3600) + "z".repeat(400)), {
+			...base,
+			archive: noOp,
+			fetcher: decisions([0.99, 0.99, 0.01]),
+		}),
+	).toBeUndefined();
+	expect(await readdir(noOp)).toEqual([]);
+});
+
+test("a shorter receipt that costs more model tokens leaves the original output unchanged", async () => {
+	const dir = await archive();
+	const text = "a".repeat(10_800);
+	const selected = Array.from({ length: 5 }, (_, i) => ({
+		start: i * 1_800 + 1,
+		end: (i + 1) * 1_800,
+	}));
+	const result = await statifyResult(tool(text), {
+		archive: dir,
+		task: "Find the relevant function",
+		key: "test-key",
+		consent: true,
+		mode: "replace",
+		fetcher: decisions([0.99, 0.99, 0.99, 0.99, 0.99, 0.01], async () => {
+			const [filename] = await readdir(dir);
+			if (!filename) throw new Error("Archive missing before decision");
+			const receipt = statifyReceipt(
+				text.length,
+				selected,
+				filename.slice(0, -4),
+				createHash("sha256").update(text).digest("hex"),
+			);
+			const display = `${receipt}${selected
+				.map(
+					({ start, end }) =>
+						`[${start}-${end}]\n${text.slice(start - 1, end)}`,
+				)
+				.join("\n")}`;
+			expect(display.length).toBeLessThan(text.length);
+			expect(countTokens(display)).toBeGreaterThan(countTokens(text));
+		}),
+	});
+	expect(result).toBeUndefined();
+	expect(await readdir(dir)).toEqual([]);
+});
+
+test("bypass keeps short, errors, images, skill, plan, explicit full request, and suspected secrets local", async () => {
+	const dir = await archive();
+	let calls = 0;
+	const fetcher = async (
+		_url: string,
+		_init: RequestInit,
+	): Promise<Response> => {
+		calls++;
+		throw new Error("unexpected network call");
+	};
+	const base = {
+		archive: dir,
+		task: "Find repair order",
+		key: "test-key",
+		consent: true,
+		mode: "replace" as const,
+		fetcher,
+	};
+	const variants = [
+		tool("short"),
+		tool(longText, "read", true),
+		tool(longText, "bash"),
+		tool(longText, "read", false, "skill://ponytail"),
+		tool(longText, "grep", false, "docs/plan.md"),
+		tool(longText, "read", false, "local://repair-plan.md"),
+		tool(`[Could not read src/thing.ts: missing]\n${longText}`),
+		tool(`OPENROUTER_API_KEY=secret\n${longText}`),
+		tool("x".repeat(25_000)),
+		{
+			...tool(longText),
+			content: [{ type: "image" as const, data: "abc", mimeType: "image/png" }],
+		},
+	];
+	for (const event of variants) {
+		expect(await statifyResult(event, base)).toBeUndefined();
+		expect(calls).toBe(0);
+	}
+	expect(
+		await statifyResult(tool(longText), { ...base, task: "Show full output" }),
+	).toBeUndefined();
+	expect(calls).toBe(0);
+	expect(
+		await statifyResult(tool(longText), {
+			...base,
+			task: "Find repair order. PASSWORD=synthetic-placeholder",
+		}),
+	).toBeUndefined();
+	expect(calls).toBe(0);
+	expect(
+		await statifyResult(tool(longText), { ...base, consent: false }),
+	).toBeUndefined();
+	expect(
+		await statifyResult(tool(longText), { ...base, key: undefined }),
+	).toBeUndefined();
+	expect(calls).toBe(0);
+	expect(await readdir(dir)).toEqual([]);
+});
+
+test("malformed answers, auth failure, network failure, and disk errors fail open", async () => {
+	const dir = await archive();
+	const base = {
+		archive: dir,
+		task: "Find repair order",
+		key: "test-key",
+		consent: true,
+		mode: "replace" as const,
+	};
+	for (const replies of [
+		{ chunk_0: { type: "noul", noul: 2 } },
+		{ chunk_0: { type: "choice", noul: 0.9 } },
+		{ chunk_0: { type: "noul", noul: 0.9 } },
+		{
+			chunk_0: { type: "noul", noul: 0.01 },
+			chunk_1: { type: "noul", noul: null },
+			chunk_2: { type: "noul", noul: 0.01 },
+		},
+	]) {
+		const event = tool(longText);
+		expect(
+			await statifyResult(event, {
+				...base,
+				fetcher: async () => new Response(JSON.stringify({ answers: replies })),
+			}),
+		).toBeUndefined();
+		expect(event).toEqual(tool(longText));
+	}
+	expect(
+		await statifyResult(tool(longText), {
+			...base,
+			fetcher: async () => new Response("unauthorized", { status: 401 }),
+		}),
+	).toBeUndefined();
+	expect(
+		await statifyResult(tool(longText), {
+			...base,
+			fetcher: async () => {
+				throw Error("connection reset");
+			},
+		}),
+	).toBeUndefined();
+	expect(await readdir(dir)).toEqual([]);
+	expect(
+		await statifyResult(tool(longText), {
+			...base,
+			archive: join(dir, "missing", "\0invalid"),
+			fetcher: decisions([0.99, 0.99, 0.99]),
+		}),
+	).toBeUndefined();
+});
+
+test("Unicode boundaries reject half a surrogate, accept exact whole range", async () => {
+	const dir = await archive();
+	const text = `${"a".repeat(1799)}🦊${"b".repeat(2300)}`;
+	const result = await statifyResult(tool(text), {
+		archive: dir,
+		task: "Find fox",
+		key: "test-key",
+		consent: true,
+		mode: "replace",
+		fetcher: decisions([0.01, 0.99, 0.01]),
+	});
+	const id =
+		result && /statify archive ([\da-f-]+)/.exec(result.content[0].text)?.[1];
+	if (!id) throw new Error("Receipt missing archive ID");
+	expect(await readArchive(dir, id, "1800-1801")).toBe("🦊");
+	await expect(readArchive(dir, id, "1800-1800")).rejects.toThrow(
+		"splits a Unicode character",
+	);
+});

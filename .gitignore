@@ -1,0 +1,6 @@
+node_modules/
+mise.local.toml
+*.statify/
+.env
+.env.*
+WATCHDOG.yml
