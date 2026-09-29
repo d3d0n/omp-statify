@@ -1,6 +1,6 @@
 {
 	"name": "omp-statify",
-	"version": "0.2.0-dev.1",
+	"version": "0.2.0-dev.2",
 	"description": "Jev-powered context filtering for Oh-my-pi",
 	"type": "module",
 	"bin": {

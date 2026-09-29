@@ -7,6 +7,7 @@ import { countTokens } from "@oh-my-pi/pi-natives";
 import {
 	readArchive,
 	statifyAssistantContext,
+	statifyMode,
 	statifyReceipt,
 	statifyResult,
 } from "../src/index";
@@ -595,4 +596,11 @@ test("Jeff key is optional, invalid endpoint or answer fails open", async () => 
 		).toBeUndefined();
 		expect(await readdir(dir)).toEqual([]);
 	}
+});
+
+test("default mode replaces for Jeff; shadow requires an explicit flag", () => {
+	expect(statifyMode(undefined)).toBe("replace");
+	expect(statifyMode("")).toBe("replace");
+	expect(statifyMode("shadow")).toBe("shadow");
+	expect(statifyMode(false)).toBeUndefined();
 });

@@ -76,6 +76,15 @@ function serializeJeff<T>(run: () => Promise<T>): Promise<T> {
 	return request;
 }
 
+/** The launch flag affects both providers; only an explicit flag changes the mode. */
+export function statifyMode(
+	value: string | boolean | undefined,
+): "replace" | "shadow" | "record" | undefined {
+	if (value === undefined || value === "") return "replace";
+	if (value === "replace" || value === "shadow" || value === "record")
+		return value;
+}
+
 function chunks(text: string): Span[] {
 	const spans: Span[] = [];
 	// Prefer a blank line before a top-level declaration/comment in OMP's
@@ -513,20 +522,11 @@ export async function statifyAssistantContext(
 export default function statify(pi: ExtensionAPI): void {
 	pi.registerFlag("statify-mode", {
 		description:
-			"Statify mode: Jev defaults to replace; Jeff defaults to shadow. Set replace explicitly for Jeff.",
+			"Statify mode: replace by default; shadow and record require an explicit flag.",
 		type: "string",
 		default: "",
 	});
-	const mode = (
-		provider: "jev" | "jeff" = "jev",
-	): "replace" | "shadow" | "record" | undefined => {
-		const value = pi.getFlag("statify-mode");
-		if (value === undefined || value === "")
-			return provider === "jeff" ? "shadow" : "replace";
-		if (value === "replace" || value === "shadow" || value === "record")
-			return value;
-		return undefined;
-	};
+	const mode = () => statifyMode(pi.getFlag("statify-mode"));
 	type JeffHealth = {
 		status: "ready" | "loading" | "unreachable";
 		authentication: boolean;
@@ -568,7 +568,7 @@ export default function statify(pi: ExtensionAPI): void {
 				ctx.ui.setStatus("statify", undefined);
 				return;
 			}
-			let state = !settings.enabled ? "off" : mode(settings.provider);
+			let state = !settings.enabled ? "off" : mode();
 			if (settings.enabled && settings.provider === "jev") {
 				if (!(await readKey())) state = "no key";
 			} else if (settings.enabled && settings.provider === "jeff") {
@@ -671,7 +671,7 @@ export default function statify(pi: ExtensionAPI): void {
 						? await health(ctx.sessionManager.getSessionId(), current.jeffUrl)
 						: undefined;
 				ctx.ui.notify(
-					`Statify ${current.enabled ? "on" : "off"} · provider ${current.provider} · key ${key ? "set" : "missing"} · mode ${mode(current.provider) ?? "invalid"} · statusline ${current.statusline ? "on" : "off"}${server ? ` · Jeff ${server.status}${server.authentication && !key ? " (key required)" : ""} at ${current.jeffUrl}` : ""}`,
+					`Statify ${current.enabled ? "on" : "off"} · provider ${current.provider} · key ${key ? "set" : "missing"} · mode ${mode() ?? "invalid"} · statusline ${current.statusline ? "on" : "off"}${server ? ` · Jeff ${server.status}${server.authentication && !key ? " (key required)" : ""} at ${current.jeffUrl}` : ""}`,
 					"info",
 				);
 			} else ctx.ui.notify(`Statify: ${action}`, "info");
@@ -731,7 +731,7 @@ export default function statify(pi: ExtensionAPI): void {
 		if (!task.trim() || isRecoveryResult(event)) return;
 		const settings = await readSettings().catch(() => undefined);
 		if (!settings?.enabled) return;
-		const currentMode = mode(settings.provider);
+		const currentMode = mode();
 		if (!currentMode || currentMode === "record") return;
 		const credentials = await access(
 			ctx.sessionManager.getSessionId(),
@@ -780,7 +780,7 @@ export default function statify(pi: ExtensionAPI): void {
 		if (!task.trim()) return;
 		const settings = await readSettings().catch(() => undefined);
 		if (!settings?.enabled) return;
-		const currentMode = mode(settings.provider);
+		const currentMode = mode();
 		if (!currentMode || currentMode === "record") return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		const credentials = await access(sessionId, settings);

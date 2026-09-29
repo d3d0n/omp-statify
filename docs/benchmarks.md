@@ -52,3 +52,21 @@ For [SWE-bench Verified `pytest-dev__pytest-10356`](https://huggingface.co/datas
 | `replace` | $0.069136400 | $0.000243264 ($0.000137382 replacement + $0.000105882 `no_op`) | $0.069379664 | Passed |
 
 Both independently passed the regression and the full `testing/test_mark.py`: **89 passed, 1 xfailed**; the test-file hash stayed unchanged. The first read changed **10,284 → 7,274 characters**; a second 5,745-character read remained unchanged but still incurred Jev cost. The replace agent obtained missing context with ordinary ranged `read`, not `xd://statify_read`. Observed total savings were **$0.030302336 (30.4%)** on this one task. The baseline made 13 model turns versus replace's 11, with `cacheRead` **184,960 versus 106,112**. The difference cannot be attributed solely to Jev, and neither one repair nor the short lookups establish general quality or cost improvement.
+
+## Paired Jev / local Jeff 0.8B: relevance and latency
+
+On a base Apple M4 (24 GB, macOS 27.0), 20 of the same pinned public RepoQA inputs above (Go offset 1 × 7, Python offset 0 × 7, C++ offset 2 × 6; 170,993 original characters) went through `statifyResult` with identical task, chunk questions and order per pair. Jev used OpenRouter `typesafe/jev-1.13`; a **warmed** localhost Jeff server used `jeff-qwen3.5-0.8b` (MLX). Each provider classified each case once in `shadow`; the exact response was then replayed locally through `replace` to check whether the pinned function-signature line remained visible. The replay made **no second provider call**. Provider order alternated by case; latency below covers the live `shadow` request and response consumption, not archival or the main model. The only data sent to OpenRouter was pinned public code and its public task.
+
+| 20 matched cases; 108 questions per provider | Jev | Jeff 0.8B |
+| --- | ---: | ---: |
+| Gold signature line visible after `replace` replay | **20/20** | **19/20** |
+| `replaced` / `no_op` | 16 / 4 | 14 / 6 |
+| Original → displayed characters | 170,993 → 105,920 | 170,993 → 106,974 |
+| Median / p90 live decision latency | 0.512 / 0.615 s | **2.409 / 2.992 s** |
+| Classifier provider-reported charge | $0.003376044 | Not reported; local resources not free |
+
+The missing Jeff signature was [`processExecution` in public `fzf/src/terminal.go`](https://github.com/junegunn/fzf/blob/e352b6887849cb6c3c8ae1d98ed357f94273e90a/src/terminal.go): Jeff scored its chunk **0.0907148** (below the current `≤0.15` omission cutoff), while Jev scored it about **0.59** and kept it. Jeff's replay displayed **2,418 of 10,827** characters; the exact omitted signature was recoverable from its archive, but not visible to the main model. A separate public 11-question input took **6.628 s Jeff vs 0.990 s Jev**. Three additional labelled lookups in pinned Statify code preserved their required lines with both providers; Jeff shortened **none** of those three results, Jev shortened one. None of these checks used the 2B checkpoint.
+
+For the `fzf` miss, a single controlled GPT-6-Sol replay placed the same captured read output in a **user prompt with model tools disabled**. Baseline and Jev `replace` answered `processExecution` correctly; Jeff `replace` answered **`isExecuteAction`**, an incorrect function from the same file. Jeff's shorter context cost the main model **$0.011616** versus **$0.011446** baseline because its wrong response used 569 output tokens versus 17; Jev `replace` cost **$0.008616392** including the Jev call. This is one model replay, **not** a live agent code-repair trial or proof of general accuracy. The model could not invoke `xd://statify_read` in this replay; a real agent might recover missing text if it notices the omission.
+
+**Decision boundary:** These observations demonstrate at least one consequential false omission for Jeff 0.8B at the Jev-oriented `≤0.15` cutoff and slower warmed local decisions in this sample. They do **not** establish a false-omission rate, validate another threshold/model, measure local energy/memory cost, or prove downstream quality across coding tasks. Jeff `replace` remains experimental: selecting Jeff and enabling Statify explicitly accepts that risk. Explicit `--statify-mode=shadow` remains available for future diagnostics, but it is **not** Jeff's default.

@@ -4,7 +4,7 @@
 
 An [Oh-my-pi](https://github.com/can1357/oh-my-pi) extension that selects useful parts of large text results from **any OMP tool** before they enter the main model's context. Jev runs through OpenRouter by default; experimental Jeff runs as a separate local server. Statify can also shorten earlier plain-text assistant messages at OMP's pre-model `context` hook. User prompts and instruction messages are never rewritten. Original text is kept locally for exact recovery; the main model does not change.
 
-Statify starts **off**. Jev requires its own OpenRouter key and defaults to `replace`; Jeff needs no OpenRouter key and defaults to `shadow` until OMP is launched explicitly with `--statify-mode=replace`. Low-confidence chunks stay visible under Jev; Jeff's omission quality has **not** been calibrated for code/log tasks. Network errors, unsupported results, and replacements that do not reduce the local token estimate leave the original result intact. This is a cost experiment, not a guarantee of cheaper or more accurate coding.
+Statify starts **off**. Jev requires its own OpenRouter key; Jeff needs no OpenRouter key. After explicit `/statify on`, both providers default to `replace`. Jeff 0.8B **omitted a required code line and produced a wrong main-model answer in a paired check**; selecting it for replacement accepts that risk. Unsupported inputs, failed requests, and non-shrinking replacements keep the original. Original text remains archived for recovery when a replacement succeeds, but recovery does not make an incorrect omission harmless. See the [paired benchmark](docs/benchmarks.md#paired-jev--local-jeff-08b-relevance-and-latency).
 
 ## Quick start
 
@@ -29,7 +29,7 @@ Run the printed `jeff:serve` command in a **separate, persistent terminal**; Sta
 /statify status
 ```
 
-Jeff accepts only a loopback HTTP endpoint (default `http://127.0.0.1:8765`; change via `/statify jeff-url <url>`). It requires no OpenRouter key; if you set `JEFF_API_KEY` when starting the server, run `statify jeff-key add` for the **same active OMP profile**, or use `/statify jeff-key add` to display the installed terminal command. Never paste secrets into OMP chat. Jeff defaults to `shadow` (classifies without shortening); launch OMP with `omp --statify-mode=replace` only if you knowingly accept experimental, **unvalidated** omission of useful code/logs. Explicit `/statify on` is still required. Treat tool output as untrusted data; heuristic secret bypass and local archive recovery are not guarantees against leaks or bad omissions. The Jev benchmark below **does not establish Jeff quality**. See [setup and cleanup](docs/setup.md), [local inference details](docs/local-inference.md), and [Jeff risks](docs/jeff.md).
+Jeff accepts only a loopback HTTP endpoint (default `http://127.0.0.1:8765`; change via `/statify jeff-url <url>`). It requires no OpenRouter key; if you set `JEFF_API_KEY` when starting the server, run `statify jeff-key add` for the **same active OMP profile**, or use `/statify jeff-key add` to display the installed terminal command. Never paste secrets into OMP chat. With `/statify provider jeff` and `/statify on`, Jeff now **replaces by default**, without `--statify-mode=replace`. An explicit `--statify-mode=shadow` still classifies without omitting for diagnostics. The current omission threshold lost a required code line in a public benchmark; recovery and heuristic secret bypass do not guarantee safe filtering. See [setup and cleanup](docs/setup.md), [paired results](docs/benchmarks.md#paired-jev--local-jeff-08b-relevance-and-latency), and [Jeff risks](docs/jeff.md).
 
 ## Measured results
 
@@ -50,6 +50,6 @@ The replay places captured tool output in a user message; **it is not a real age
 
 ## TODO
 
-- [ ] Calibrate Jeff omissions against paired Jev/Jeff shadow runs on the same public code/log tasks, including human-reviewed false omissions, latency, total cost, and privacy; remote Jev results do not validate Jeff.
+- [ ] Extend the paired Jev/Jeff benchmark to held-out repair tasks, human-reviewed false omissions, realistic parallel latency and recovery during real agent work; the observed 0.8B false omission prevents a quality-equivalence claim.
 - [ ] Test whether an agent actually uses archive recovery when a needed code span was omitted during a repair.
 - [ ] Measure multi-repository bug fixes and add a model-aware cost gate for inexpensive main models.
