@@ -2,7 +2,7 @@
 
 [![Stars](https://img.shields.io/github/stars/d3d0n/omp-statify?style=flat-square)](https://github.com/d3d0n/omp-statify/stargazers) [![Issues](https://img.shields.io/github/issues/d3d0n/omp-statify?style=flat-square)](https://github.com/d3d0n/omp-statify/issues) [![Last commit](https://img.shields.io/github/last-commit/d3d0n/omp-statify?style=flat-square)](https://github.com/d3d0n/omp-statify/commits/main) [![Bun 1.4.2](https://img.shields.io/badge/Bun-1.4.2-f9f1e1?logo=bun&logoColor=black&style=flat-square)](https://bun.sh)
 
-An [Oh-my-pi](https://github.com/can1357/oh-my-pi) extension that uses [Jev](https://docs.typesafe.ai/introduction) to select useful parts of large `read` and `grep` results **before** they enter the main model's context. It keeps the original output locally and lets the agent recover exact omitted ranges. The main model does not change.
+An [Oh-my-pi](https://github.com/can1357/oh-my-pi) extension that uses [Jev](https://docs.typesafe.ai/introduction) to select useful parts of large text results from **any OMP tool** before they enter the main model's context. It can also shorten earlier plain-text assistant messages at OMP's pre-model `context` hook. User prompts and instruction messages are never rewritten. Original text is kept locally for exact recovery; the main model does not change.
 
 Statify starts **off**. Enabling it with its own OpenRouter key selects `replace`; low-confidence chunks stay visible. Network errors, unsupported results, and replacements that do not reduce the local token estimate leave the original result intact. This is a cost experiment, not a guarantee of cheaper or more accurate coding.
 

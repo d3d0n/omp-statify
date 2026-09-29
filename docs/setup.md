@@ -33,7 +33,7 @@ omp --extension ./src/index.ts --statify-mode=shadow
 omp --extension ./src/index.ts --statify-mode=record
 ```
 
-`shadow` makes paid Jev requests without replacing tool output; `record` makes no Jev requests and does not replace tool output. Neither overrides the requirement to enable Statify for live sending. A normal launch uses `replace` after `on`. The extension handles eligible text from `read` and `grep`, not all tools; see [architecture](architecture.md) for limits.
+`shadow` makes paid Jev requests without replacing context; `record` makes no Jev requests and changes nothing. Neither overrides the requirement to enable Statify for live sending. A normal launch uses `replace` after `on`. Eligible text from any tool, including shell output, and earlier plain-text assistant messages may be sent; user prompts and instruction messages are not rewritten. See [architecture](architecture.md) for size, privacy, and format limits.
 
 ## Manage or remove access
 

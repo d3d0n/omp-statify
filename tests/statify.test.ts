@@ -4,7 +4,12 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countTokens } from "@oh-my-pi/pi-natives";
-import { readArchive, statifyReceipt, statifyResult } from "../src/index";
+import {
+	readArchive,
+	statifyAssistantContext,
+	statifyReceipt,
+	statifyResult,
+} from "../src/index";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -295,7 +300,70 @@ test("a shorter receipt that costs more model tokens leaves the original output 
 	expect(await readdir(dir)).toEqual([]);
 });
 
-test("bypass keeps short, errors, images, skill, plan, explicit full request, and suspected secrets local", async () => {
+test("non-read tool output, including errors, is filtered and recoverable", async () => {
+	const dir = await archive();
+	const result = await statifyResult(tool(longText, "bash", true), {
+		archive: dir,
+		task: "Find repair order",
+		key: "test-key",
+		consent: true,
+		mode: "replace",
+		fetcher: decisions([0.01, 0.99, 0.01]),
+	});
+	if (!result) throw new Error("Expected filtered shell output");
+	const output = result.content[0].text;
+	expect(output).toContain("IMPORTANT: invoke repair()");
+	expect(output).not.toContain("irrelevant log line\n".repeat(100));
+	const id = /statify archive ([\da-f-]+)/.exec(output)?.[1];
+	if (!id) throw new Error("Missing recovery ID");
+	expect(await readArchive(dir, id, `1-${longText.length}`)).toBe(longText);
+});
+
+test("context filters past assistant prose without changing user or instruction messages", async () => {
+	const dir = await archive();
+	type Messages = Parameters<typeof statifyAssistantContext>[0];
+	const messages = [
+		{ role: "user", content: longText, timestamp: 1 },
+		{
+			role: "developer",
+			content: [{ type: "text", text: longText }],
+			timestamp: 2,
+		},
+		{
+			role: "assistant",
+			content: [{ type: "text", text: longText }],
+			timestamp: 3,
+		},
+	] as Messages;
+	let calls = 0;
+	const options = {
+		archive: dir,
+		task: "Find repair order",
+		key: "test-key",
+		consent: true,
+		mode: "replace" as const,
+		fetcher: decisions([0.01, 0.99, 0.01], async () => {
+			calls++;
+		}),
+	};
+	const cache = new Map<string, Promise<string | undefined>>();
+	const result = await statifyAssistantContext(messages, options, cache);
+	if (result?.[2]?.role !== "assistant")
+		throw new Error("Expected filtered assistant context");
+	expect(result[0]).toBe(messages[0]);
+	expect(result[1]).toBe(messages[1]);
+	expect(result[2].content[0]).toHaveProperty(
+		"text",
+		expect.stringContaining("statify archive"),
+	);
+	expect(
+		messages[2]?.role === "assistant" && messages[2].content[0],
+	).toHaveProperty("text", longText);
+	await statifyAssistantContext(messages, options, cache);
+	expect(calls).toBe(1);
+});
+
+test("bypass keeps short, images, skill, plan, explicit full request, and suspected secrets local", async () => {
 	const dir = await archive();
 	let calls = 0;
 	const fetcher = async (
@@ -315,8 +383,7 @@ test("bypass keeps short, errors, images, skill, plan, explicit full request, an
 	};
 	const variants = [
 		tool("short"),
-		tool(longText, "read", true),
-		tool(longText, "bash"),
+		tool(longText, "statify_read"),
 		tool(longText, "read", false, "skill://ponytail"),
 		tool(longText, "grep", false, "docs/plan.md"),
 		tool(longText, "read", false, "local://repair-plan.md"),
