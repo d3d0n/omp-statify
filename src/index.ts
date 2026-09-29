@@ -172,9 +172,16 @@ export async function readArchive(
 	return text.slice(start - 1, end);
 }
 
+function isRecoveryResult(event: Result): boolean {
+	return (
+		event.toolName === "statify_read" ||
+		(event.toolName === "write" && event.input.path === "xd://statify_read")
+	);
+}
+
 function shouldSkip(event: Result, task: string): boolean {
 	if (
-		event.toolName === "statify_read" ||
+		isRecoveryResult(event) ||
 		event.content.length !== 1 ||
 		event.content[0]?.type !== "text"
 	)
@@ -596,7 +603,7 @@ export default function statify(pi: ExtensionAPI): void {
 	>();
 	pi.on("tool_result", async (event, ctx) => {
 		const task = latestTask(ctx.sessionManager.getBranch());
-		if (!task.trim() || event.toolName === "statify_read") return;
+		if (!task.trim() || isRecoveryResult(event)) return;
 		const settings = await readSettings().catch(() => undefined);
 		if (!settings?.enabled) return;
 		const currentMode = mode();
@@ -677,15 +684,23 @@ export default function statify(pi: ExtensionAPI): void {
 		}
 	});
 	const readParams = pi.zod.object({
-		id: pi.zod.string(),
-		range: pi.zod.string(),
+		id: pi.zod
+			.string()
+			.describe("Archive UUID printed in the Statify omission receipt."),
+		range: pi.zod
+			.string()
+			.describe(
+				"Inclusive 1-based UTF-16 character range from the receipt, e.g. 1801-3000; at most 8000 characters, not source-file lines.",
+			),
 	});
 	pi.registerTool({
 		name: "statify_read",
-		label: "Statify read",
+		label: "Recover Statify text",
 		description:
-			"Read an exact inclusive 1-based UTF-16 character range from a statify archive in this session (max 8000 characters). Use the archive ID and range in the tool result receipt.",
+			"Recover exact text omitted by Statify in this session. Use the archive ID and inclusive UTF-16 range from its receipt (max 8000 characters; not source-file lines).",
 		parameters: readParams,
+		strict: true,
+		approval: "read",
 		async execute(_id, params, _signal, _update, ctx) {
 			try {
 				const { id, range } = readParams.parse(params);

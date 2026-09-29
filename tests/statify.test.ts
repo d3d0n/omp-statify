@@ -384,6 +384,13 @@ test("bypass keeps short, images, skill, plan, explicit full request, and suspec
 	const variants = [
 		tool("short"),
 		tool(longText, "statify_read"),
+		{
+			...tool(longText, "write"),
+			input: {
+				path: "xd://statify_read",
+				content: '{"id":"archive","range":"1-2000"}',
+			},
+		},
 		tool(longText, "read", false, "skill://ponytail"),
 		tool(longText, "grep", false, "docs/plan.md"),
 		tool(longText, "read", false, "local://repair-plan.md"),
