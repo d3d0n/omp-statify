@@ -8,19 +8,14 @@ Statify starts **off**. Enabling it with its own OpenRouter key selects `replace
 
 ## Quick start
 
-Requires the [OMP CLI](https://github.com/can1357/oh-my-pi#install) and [mise](https://mise.jdx.dev/getting-started.html):
+Requires [OMP](https://github.com/can1357/oh-my-pi#install) and Bun. Install the package as an OMP plugin (extension discovery is automatic):
 
 ```sh
-git clone https://github.com/d3d0n/omp-statify.git
-cd omp-statify
-mise install bun@1.4.2
-mise run install
-bun src/manage.ts key add  # hidden input; never pass the key as an argument
-bun src/manage.ts on
-omp --extension ./src/index.ts
+omp plugin install github:d3d0n/omp-statify
+omp
 ```
 
-Use `bun src/manage.ts off` to pause, `key remove` to delete only Statify's key, or `/statify` for the optional OMP menu. Override the default mode for one launch with `--statify-mode=shadow` or `--statify-mode=record`. The optional statusline is off by default. The key is stored locally with `0600` permissions, **not encrypted**; enable Statify only for data you may send to OpenRouter. [Full setup and profile-aware installation](docs/setup.md).
+Statify starts **off**. In OMP, run `/statify key add` to get the installed package's terminal command for entering your OpenRouter key without echo, then `/statify on`. Run `/statify status` to check. Once published to npm, `omp plugin install omp-statify` will install the same package. The optional statusline is off by default; key storage uses `0600` permissions and is **not encrypted**. Enable Statify only for data you may send to OpenRouter. [Full setup and profile-aware management](docs/setup.md).
 
 ## Measured results
 

@@ -1,11 +1,37 @@
 {
 	"name": "omp-statify",
-	"private": true,
+	"version": "0.1.0",
+	"description": "Jev-powered context filtering for Oh-my-pi",
 	"type": "module",
+	"bin": {
+		"statify": "./src/manage.ts"
+	},
+	"omp": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"files": [
+		"src/index.ts",
+		"src/manage.ts",
+		"src/settings.ts",
+		"README.md",
+		"docs/"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/d3d0n/omp-statify.git"
+	},
+	"homepage": "https://github.com/d3d0n/omp-statify#readme",
+	"engines": {
+		"bun": ">=1.4.2"
+	},
+	"dependencies": {
+		"@oh-my-pi/pi-coding-agent": "18.4.2",
+		"@oh-my-pi/pi-natives": "18.4.2"
+	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.14",
-		"@oh-my-pi/pi-coding-agent": "18.4.2",
-		"@oh-my-pi/pi-natives": "18.4.2",
 		"@types/bun": "1.4.2",
 		"typescript": "7.0.2"
 	}

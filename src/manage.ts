@@ -67,7 +67,7 @@ async function main(): Promise<void> {
 	if (action === "key" && argument === "add") {
 		await saveKey(await hiddenKey());
 		console.log(
-			"OpenRouter key saved; enable Statify separately with: bun src/manage.ts on",
+			"OpenRouter key saved; enable Statify separately with /statify on in OMP or statify on in a terminal",
 		);
 		return;
 	}
