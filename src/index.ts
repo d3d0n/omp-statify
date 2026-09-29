@@ -10,7 +10,17 @@ import type {
 	ToolResultEvent,
 } from "@oh-my-pi/pi-coding-agent";
 import { countTokens } from "@oh-my-pi/pi-natives";
-import { readKey, readSettings, removeKey, saveSettings } from "./settings";
+import type { StatifySettings } from "./settings";
+import {
+	DEFAULT_JEFF_URL,
+	parseJeffUrl,
+	readJeffKey,
+	readKey,
+	readSettings,
+	removeJeffKey,
+	removeKey,
+	saveSettings,
+} from "./settings";
 
 const MIN_LENGTH = 4_000;
 const CHUNK_LENGTH = 1_800;
@@ -32,6 +42,8 @@ export type StatifyOptions = {
 	archive: string;
 	task: string;
 	key?: string;
+	provider?: "jev" | "jeff";
+	jeffUrl?: string;
 	consent: boolean;
 	mode: "shadow" | "replace";
 	fetcher?: (url: string, init: RequestInit) => Promise<Response>;
@@ -55,6 +67,14 @@ export type StatifyObservation = {
 		invalidChunks: number;
 	};
 };
+
+let jeffQueue: Promise<unknown> = Promise.resolve();
+
+function serializeJeff<T>(run: () => Promise<T>): Promise<T> {
+	const request = jeffQueue.then(run, run);
+	jeffQueue = request.catch(() => undefined);
+	return request;
+}
 
 function chunks(text: string): Span[] {
 	const spans: Span[] = [];
@@ -213,9 +233,10 @@ export async function statifyResult(
 			// Benchmark observers must not affect tool results.
 		}
 	};
+	const provider = options.provider ?? "jev";
 	if (
 		!options.consent ||
-		!options.key ||
+		(provider === "jev" && !options.key) ||
 		!options.task.trim() ||
 		shouldSkip(event, options.task)
 	) {
@@ -238,6 +259,10 @@ export async function statifyResult(
 	let archived: { id: string; hash: string } | undefined;
 	let keepArchive = false;
 	try {
+		const url =
+			provider === "jeff"
+				? `${parseJeffUrl(options.jeffUrl ?? DEFAULT_JEFF_URL)}/v1/systemone`
+				: "https://openrouter.ai/api/alpha/decisions";
 		if (options.mode === "replace")
 			archived = await archiveText(options.archive, text);
 		const questions = Object.fromEntries(
@@ -254,22 +279,25 @@ export async function statifyResult(
 				},
 			]),
 		);
-		const response = await (options.fetcher ?? fetch)(
-			"https://openrouter.ai/api/alpha/decisions",
-			{
+		const headers: Record<string, string> = {
+			"Content-Type": "application/json",
+		};
+		if (options.key) headers.Authorization = `Bearer ${options.key}`;
+		const signal = AbortSignal.timeout(15_000);
+		const request = () =>
+			(options.fetcher ?? fetch)(url, {
 				method: "POST",
-				headers: {
-					Authorization: `Bearer ${options.key}`,
-					"Content-Type": "application/json",
-				},
+				headers,
 				body: JSON.stringify({
-					model: "typesafe/jev-1.13",
+					model: provider === "jeff" ? "jeff-latest" : "typesafe/jev-1.13",
 					state: { task: options.task.slice(0, 1_500) },
 					questions,
 				}),
-				signal: AbortSignal.timeout(15_000),
-			},
-		);
+				signal,
+			});
+		const response = await (provider === "jeff"
+			? serializeJeff(request)
+			: request());
 		if (!response.ok) {
 			observe({ status: "api_error", httpStatus: response.status });
 			return;
@@ -453,6 +481,10 @@ export async function statifyAssistantContext(
 			)
 				return message;
 			const key = createHash("sha256")
+				.update(options.provider ?? "jev")
+				.update("\0")
+				.update(options.jeffUrl ?? "")
+				.update("\0")
 				.update(options.task)
 				.update("\0")
 				.update(text)
@@ -481,16 +513,53 @@ export async function statifyAssistantContext(
 export default function statify(pi: ExtensionAPI): void {
 	pi.registerFlag("statify-mode", {
 		description:
-			"Statify mode for this launch: replace (default), shadow, or record",
+			"Statify mode: Jev defaults to replace; Jeff defaults to shadow. Set replace explicitly for Jeff.",
 		type: "string",
 		default: "",
 	});
-	const mode = (): "replace" | "shadow" | "record" | undefined => {
+	const mode = (
+		provider: "jev" | "jeff" = "jev",
+	): "replace" | "shadow" | "record" | undefined => {
 		const value = pi.getFlag("statify-mode");
-		if (value === undefined || value === "" || value === "replace")
-			return "replace";
-		if (value === "shadow" || value === "record") return value;
+		if (value === undefined || value === "")
+			return provider === "jeff" ? "shadow" : "replace";
+		if (value === "replace" || value === "shadow" || value === "record")
+			return value;
 		return undefined;
+	};
+	type JeffHealth = {
+		status: "ready" | "loading" | "unreachable";
+		authentication: boolean;
+	};
+	const healthCache = new Map<
+		string,
+		{ url: string; promise: Promise<JeffHealth> }
+	>();
+	const health = (sessionId: string, url: string): Promise<JeffHealth> => {
+		const cached = healthCache.get(sessionId);
+		if (cached?.url === url) return cached.promise;
+		const promise = (async (): Promise<JeffHealth> => {
+			try {
+				const response = await fetch(`${url}/health`, {
+					signal: AbortSignal.timeout(2_000),
+				});
+				if (!response.ok) throw new Error("Jeff unavailable");
+				const data: unknown = await response.json();
+				if (!data || typeof data !== "object" || !("status" in data))
+					throw new Error("Invalid Jeff health");
+				if (data.status !== "ready" && data.status !== "loading")
+					throw new Error("Invalid Jeff status");
+				return {
+					status: data.status,
+					authentication:
+						"authentication" in data && data.authentication === true,
+				};
+			} catch {
+				return { status: "unreachable", authentication: false };
+			}
+		})();
+		healthCache.set(sessionId, { url, promise });
+		return promise;
 	};
 	const refreshStatus = async (ctx: ExtensionContext): Promise<void> => {
 		try {
@@ -499,13 +568,19 @@ export default function statify(pi: ExtensionAPI): void {
 				ctx.ui.setStatus("statify", undefined);
 				return;
 			}
-			const key = settings.enabled
-				? await readKey().catch(() => undefined)
-				: undefined;
-			ctx.ui.setStatus(
-				"statify",
-				`Statify ${!settings.enabled ? "off" : !key ? "no key" : (mode() ?? "invalid mode")}`,
-			);
+			let state = !settings.enabled ? "off" : mode(settings.provider);
+			if (settings.enabled && settings.provider === "jev") {
+				if (!(await readKey())) state = "no key";
+			} else if (settings.enabled && settings.provider === "jeff") {
+				const server = await health(
+					ctx.sessionManager.getSessionId(),
+					settings.jeffUrl,
+				);
+				if (server.status !== "ready") state = server.status;
+				else if (server.authentication && !(await readJeffKey()))
+					state = "no Jeff key";
+			}
+			ctx.ui.setStatus("statify", `Statify ${settings.provider} ${state}`);
 		} catch {
 			ctx.ui.setStatus("statify", undefined);
 		}
@@ -518,7 +593,7 @@ export default function statify(pi: ExtensionAPI): void {
 		if (!action || action === "menu") {
 			if (!ctx.hasUI) {
 				ctx.ui.notify(
-					"Use bun src/manage.ts on|off|status|key add|key remove|statusline on|off",
+					"Use statify on|off|status|provider jev|jeff|jeff setup|jeff-url URL|jeff-key add|remove in a terminal",
 					"info",
 				);
 				return;
@@ -527,6 +602,11 @@ export default function statify(pi: ExtensionAPI): void {
 				"status",
 				"on",
 				"off",
+				"provider jev",
+				"provider jeff",
+				"jeff setup",
+				"jeff-key add",
+				"jeff-key remove",
 				"statusline on",
 				"statusline off",
 				"key add",
@@ -536,6 +616,15 @@ export default function statify(pi: ExtensionAPI): void {
 			return;
 		}
 		try {
+			if (action === "jeff setup") {
+				const root = `'${join(import.meta.dir, "..").replaceAll("'", "'\\''")}'`;
+				const config = `'${join(import.meta.dir, "..", "mise.toml").replaceAll("'", "'\\''")}'`;
+				ctx.ui.notify(
+					`Run in a terminal:\nmise trust ${config}\nmise -C ${root} install uv\nmise -C ${root} run jeff:setup\nmise -C ${root} run jeff:serve`,
+					"info",
+				);
+				return;
+			}
 			const settings = await readSettings();
 			if (action === "on" || action === "off")
 				await saveSettings({ ...settings, enabled: action === "on" });
@@ -544,44 +633,64 @@ export default function statify(pi: ExtensionAPI): void {
 					...settings,
 					statusline: action === "statusline on",
 				});
+			else if (action === "provider jev" || action === "provider jeff")
+				await saveSettings({
+					...settings,
+					provider: action === "provider jeff" ? "jeff" : "jev",
+				});
+			else if (action.startsWith("jeff-url "))
+				await saveSettings({
+					...settings,
+					jeffUrl: parseJeffUrl(input.trim().slice("jeff-url ".length)),
+				});
 			else if (action === "key remove") {
 				await removeKey();
-				await saveSettings({ ...settings, enabled: false });
-			} else if (action === "key add") {
-				ctx.ui.notify(
-					`Run in a terminal: bun "${join(import.meta.dir, "manage.ts")}" key add`,
-					"info",
-				);
+				if (settings.provider === "jev")
+					await saveSettings({ ...settings, enabled: false });
+			} else if (action === "jeff-key remove") {
+				await removeJeffKey();
+			} else if (action === "key add" || action === "jeff-key add") {
+				const manager = `'${join(import.meta.dir, "manage.ts").replaceAll("'", "'\\''")}'`;
+				ctx.ui.notify(`Run in a terminal: bun ${manager} ${action}`, "info");
 				return;
 			} else if (action !== "status") {
 				ctx.ui.notify(
-					"Use /statify on|off|status|key add|key remove|statusline on|off|menu",
+					"Use /statify on|off|status|provider jev|provider jeff|jeff setup|jeff-url URL|jeff-key add|jeff-key remove|key add|key remove|statusline on|off",
 					"warning",
 				);
 				return;
 			}
+			healthCache.delete(ctx.sessionManager.getSessionId());
 			await refreshStatus(ctx);
 			if (action === "status") {
 				const current = await readSettings();
-				const key = await readKey().catch(() => undefined);
+				const key =
+					current.provider === "jev" ? await readKey() : await readJeffKey();
+				const server =
+					current.provider === "jeff"
+						? await health(ctx.sessionManager.getSessionId(), current.jeffUrl)
+						: undefined;
 				ctx.ui.notify(
-					`Statify ${current.enabled ? "on" : "off"} · key ${key ? "set" : "missing"} · mode ${mode() ?? "invalid"} · statusline ${current.statusline ? "on" : "off"}`,
+					`Statify ${current.enabled ? "on" : "off"} · provider ${current.provider} · key ${key ? "set" : "missing"} · mode ${mode(current.provider) ?? "invalid"} · statusline ${current.statusline ? "on" : "off"}${server ? ` · Jeff ${server.status}${server.authentication && !key ? " (key required)" : ""} at ${current.jeffUrl}` : ""}`,
 					"info",
 				);
 			} else ctx.ui.notify(`Statify: ${action}`, "info");
-		} catch {
+		} catch (error) {
 			ctx.ui.notify(
-				"Statify settings failed; tool output remains unchanged",
+				error instanceof Error ? error.message : "Statify settings failed",
 				"error",
 			);
 		}
 	};
 	pi.registerCommand("statify", {
-		description: "Toggle Statify, manage its key, and configure statusline",
+		description: "Choose Jev or Jeff and manage Statify",
 		handler: command,
 	});
 	pi.on("session_start", async (_event, ctx) => refreshStatus(ctx));
-	pi.on("turn_start", async (_event, ctx) => refreshStatus(ctx));
+	pi.on("turn_start", async (_event, ctx) => {
+		healthCache.delete(ctx.sessionManager.getSessionId());
+		await refreshStatus(ctx);
+	});
 	const ephemeral = new Map<string, string>();
 	const directory = async (session: {
 		getSessionFile(): string | undefined;
@@ -601,15 +710,34 @@ export default function statify(pi: ExtensionAPI): void {
 		string,
 		Map<string, Promise<string | undefined>>
 	>();
+	const access = async (
+		sessionId: string,
+		settings: StatifySettings,
+	): Promise<{ key?: string } | undefined> => {
+		try {
+			const key =
+				settings.provider === "jev" ? await readKey() : await readJeffKey();
+			if (settings.provider === "jev") return key ? { key } : undefined;
+			const server = await health(sessionId, settings.jeffUrl);
+			if (server.status !== "ready" || (server.authentication && !key)) return;
+			return { key };
+		} catch {
+			// Invalid key storage, unreachable server, or corrupt settings fail open.
+			return;
+		}
+	};
 	pi.on("tool_result", async (event, ctx) => {
 		const task = latestTask(ctx.sessionManager.getBranch());
 		if (!task.trim() || isRecoveryResult(event)) return;
 		const settings = await readSettings().catch(() => undefined);
 		if (!settings?.enabled) return;
-		const currentMode = mode();
+		const currentMode = mode(settings.provider);
 		if (!currentMode || currentMode === "record") return;
-		const key = await readKey().catch(() => undefined);
-		if (!key) return;
+		const credentials = await access(
+			ctx.sessionManager.getSessionId(),
+			settings,
+		);
+		if (!credentials) return;
 		try {
 			const archive = await directory(ctx.sessionManager);
 			let changed = false;
@@ -621,11 +749,14 @@ export default function statify(pi: ExtensionAPI): void {
 						{
 							archive,
 							task,
-							key,
+							key: credentials.key,
+							provider: settings.provider,
+							jeffUrl: settings.jeffUrl,
 							consent: true,
 							mode: currentMode,
 							observe: ({ status, usage }) =>
 								pi.logger.info("statify usage", {
+									provider: settings.provider,
 									status,
 									inputTokens: usage?.inputTokens ?? null,
 									outputTokens: usage?.outputTokens ?? null,
@@ -649,12 +780,12 @@ export default function statify(pi: ExtensionAPI): void {
 		if (!task.trim()) return;
 		const settings = await readSettings().catch(() => undefined);
 		if (!settings?.enabled) return;
-		const currentMode = mode();
+		const currentMode = mode(settings.provider);
 		if (!currentMode || currentMode === "record") return;
-		const key = await readKey().catch(() => undefined);
-		if (!key) return;
+		const sessionId = ctx.sessionManager.getSessionId();
+		const credentials = await access(sessionId, settings);
+		if (!credentials) return;
 		try {
-			const sessionId = ctx.sessionManager.getSessionId();
 			let cache = assistantCache.get(sessionId);
 			if (!cache) {
 				cache = new Map();
@@ -665,11 +796,14 @@ export default function statify(pi: ExtensionAPI): void {
 				{
 					archive: await directory(ctx.sessionManager),
 					task,
-					key,
+					key: credentials.key,
+					provider: settings.provider,
+					jeffUrl: settings.jeffUrl,
 					consent: true,
 					mode: currentMode,
 					observe: ({ status, usage }) =>
 						pi.logger.info("statify usage", {
+							provider: settings.provider,
 							status,
 							inputTokens: usage?.inputTokens ?? null,
 							outputTokens: usage?.outputTokens ?? null,
@@ -732,6 +866,7 @@ export default function statify(pi: ExtensionAPI): void {
 		ctx.ui.setStatus("statify", undefined);
 		const id = ctx.sessionManager.getSessionId();
 		assistantCache.delete(id);
+		healthCache.delete(id);
 		const dir = ephemeral.get(id);
 		if (dir) {
 			ephemeral.delete(id);

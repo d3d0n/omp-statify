@@ -1,15 +1,20 @@
 #!/usr/bin/env bun
+import { resolve } from "node:path";
 import {
+	parseJeffUrl,
+	readJeffKey,
 	readKey,
 	readSettings,
+	removeJeffKey,
 	removeKey,
+	saveJeffKey,
 	saveKey,
 	saveSettings,
 } from "./settings";
 
-async function hiddenKey(): Promise<string> {
+async function hiddenKey(label = "OpenRouter"): Promise<string> {
 	if (!process.stdin.isTTY) return Bun.stdin.text();
-	process.stdout.write("OpenRouter key (hidden): ");
+	process.stdout.write(`${label} key (hidden): `);
 	process.stdin.setRawMode(true);
 	process.stdin.resume();
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
@@ -46,9 +51,15 @@ async function main(): Promise<void> {
 	if (extra) throw new Error("Unexpected argument");
 	if (action === "status" && !argument) {
 		const settings = await readSettings();
-		const key = await readKey();
+		const key =
+			settings.provider === "jeff" ? await readJeffKey() : await readKey();
+		const keyStatus = key
+			? "set"
+			: settings.provider === "jeff"
+				? "missing (optional unless Jeff requires auth)"
+				: "missing";
 		console.log(
-			`Statify: ${settings.enabled ? "on" : "off"}, key: ${key ? "set" : "missing"}, statusline: ${settings.statusline ? "on" : "off"}`,
+			`Statify: ${settings.enabled ? "on" : "off"}, key: ${keyStatus}, statusline: ${settings.statusline ? "on" : "off"}, provider: ${settings.provider}, endpoint: ${settings.provider === "jeff" ? settings.jeffUrl : "OpenRouter"}`,
 		);
 		return;
 	}
@@ -64,6 +75,42 @@ async function main(): Promise<void> {
 		console.log(`Statusline ${argument}`);
 		return;
 	}
+	if (action === "provider" && (argument === "jev" || argument === "jeff")) {
+		const settings = await readSettings();
+		await saveSettings({ ...settings, provider: argument });
+		console.log(`Provider ${argument}`);
+		return;
+	}
+	if (action === "jeff-url" && argument) {
+		const settings = await readSettings();
+		const jeffUrl = parseJeffUrl(argument);
+		await saveSettings({ ...settings, jeffUrl });
+		console.log(`Jeff endpoint ${jeffUrl}`);
+		return;
+	}
+	if (action === "jeff" && argument === "setup") {
+		const root = resolve(import.meta.dir, "..");
+		const quoted = `'${root.replaceAll("'", "'\\''")}'`;
+		console.log(
+			`mise trust '${resolve(root, "mise.toml").replaceAll("'", "'\\''")}'`,
+		);
+		console.log(`mise -C ${quoted} install uv`);
+		console.log(`mise -C ${quoted} run jeff:setup`);
+		console.log(`mise -C ${quoted} run jeff:serve`);
+		return;
+	}
+	if (action === "jeff-key" && argument === "add") {
+		await saveJeffKey(await hiddenKey("Jeff"));
+		console.log(
+			"Jeff key saved; enable Statify separately with /statify on in OMP or statify on in a terminal",
+		);
+		return;
+	}
+	if (action === "jeff-key" && argument === "remove") {
+		await removeJeffKey();
+		console.log("Jeff key removed");
+		return;
+	}
 	if (action === "key" && argument === "add") {
 		await saveKey(await hiddenKey());
 		console.log(
@@ -74,12 +121,17 @@ async function main(): Promise<void> {
 	if (action === "key" && argument === "remove") {
 		await removeKey();
 		const settings = await readSettings();
-		await saveSettings({ ...settings, enabled: false });
-		console.log("Statify disabled; OpenRouter key removed");
+		if (settings.provider === "jev")
+			await saveSettings({ ...settings, enabled: false });
+		console.log(
+			settings.provider === "jev"
+				? "Statify disabled; OpenRouter key removed"
+				: "OpenRouter key removed",
+		);
 		return;
 	}
 	throw new Error(
-		"Usage: bun src/manage.ts on|off|status|key add|key remove|statusline on|off",
+		"Usage: bun src/manage.ts on|off|status|provider jev|jeff|jeff-url <url>|jeff-key add|remove|jeff setup|key add|remove|statusline on|off",
 	);
 }
 

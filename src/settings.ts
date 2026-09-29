@@ -12,8 +12,28 @@ import {
 import { join } from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 
-export type StatifySettings = { enabled: boolean; statusline: boolean };
-const defaults: StatifySettings = { enabled: false, statusline: false };
+export type StatifySettings = {
+	enabled: boolean;
+	statusline: boolean;
+	provider: "jev" | "jeff";
+	jeffUrl: string;
+};
+export const DEFAULT_JEFF_URL = "http://127.0.0.1:8765";
+const defaults: StatifySettings = {
+	enabled: false,
+	statusline: false,
+	provider: "jev",
+	jeffUrl: DEFAULT_JEFF_URL,
+};
+
+export function parseJeffUrl(input: string): string {
+	const match = /^http:\/\/127\.0\.0\.1:(\d+)\/?$/i.exec(input);
+	if (!match) throw new Error("Jeff URL must be http://127.0.0.1:<port>");
+	const port = Number(match[1]);
+	if (!Number.isInteger(port) || port < 1 || port > 65535)
+		throw new Error("Jeff URL port must be between 1 and 65535");
+	return `http://127.0.0.1:${port}`;
+}
 
 export function statifyDir(): string {
 	return getAgentDir();
@@ -46,16 +66,28 @@ export async function readSettings(
 		throw error;
 	}
 	const data: unknown = JSON.parse(text);
+	return validateSettings(data, true);
+}
+
+function validateSettings(data: unknown, legacy = false): StatifySettings {
+	if (!data || typeof data !== "object" || Array.isArray(data))
+		throw new Error("Invalid Statify settings; disabled until repaired");
+	const value = data as Record<string, unknown>;
 	if (
-		!data ||
-		typeof data !== "object" ||
-		typeof (data as StatifySettings).enabled !== "boolean" ||
-		typeof (data as StatifySettings).statusline !== "boolean"
+		typeof value.enabled !== "boolean" ||
+		typeof value.statusline !== "boolean" ||
+		((value.provider !== undefined || !legacy) &&
+			value.provider !== "jev" &&
+			value.provider !== "jeff") ||
+		((value.jeffUrl !== undefined || !legacy) &&
+			typeof value.jeffUrl !== "string")
 	)
 		throw new Error("Invalid Statify settings; disabled until repaired");
 	return {
-		enabled: (data as StatifySettings).enabled,
-		statusline: (data as StatifySettings).statusline,
+		enabled: value.enabled,
+		statusline: value.statusline,
+		provider: (value.provider ?? "jev") as StatifySettings["provider"],
+		jeffUrl: parseJeffUrl((value.jeffUrl ?? DEFAULT_JEFF_URL) as string),
 	};
 }
 
@@ -63,25 +95,34 @@ export async function saveSettings(
 	settings: StatifySettings,
 	dir = statifyDir(),
 ): Promise<void> {
-	await save(join(dir, "statify.json"), `${JSON.stringify(settings)}\n`, dir);
+	const valid = validateSettings(settings);
+	await save(join(dir, "statify.json"), `${JSON.stringify(valid)}\n`, dir);
 }
 
-export async function readKey(dir = statifyDir()): Promise<string | undefined> {
-	const path = join(dir, "statify.key");
+async function readStoredKey(
+	path: string,
+	label: string,
+): Promise<string | undefined> {
 	const info = await lstat(path).catch((error: unknown) => {
 		if (missing(error)) return undefined;
 		throw error;
 	});
 	if (!info) return undefined;
 	if (!info.isFile() || (info.mode & 0o077) !== 0)
-		throw new Error("Statify key must be a regular file with 0600 permissions");
-	return validKey(await readFile(path, "utf8"));
+		throw new Error(
+			`Statify ${label} key must be a regular file with 0600 permissions`,
+		);
+	return validKey(await readFile(path, "utf8"), label);
 }
 
-function validKey(input: string): string {
+export async function readKey(dir = statifyDir()): Promise<string | undefined> {
+	return readStoredKey(join(dir, "statify.key"), "OpenRouter");
+}
+
+function validKey(input: string, label = "OpenRouter"): string {
 	const key = input.trim();
 	if (!key || key.length > 4096 || /\p{Cc}/u.test(key))
-		throw new Error("Invalid OpenRouter key");
+		throw new Error(`Invalid ${label} key`);
 	return key;
 }
 
@@ -95,6 +136,31 @@ export async function saveKey(
 export async function removeKey(dir = statifyDir()): Promise<void> {
 	try {
 		await unlink(join(dir, "statify.key"));
+	} catch (error) {
+		if (!missing(error)) throw error;
+	}
+}
+
+export async function readJeffKey(
+	dir = statifyDir(),
+): Promise<string | undefined> {
+	return readStoredKey(join(dir, "statify-jeff.key"), "Jeff");
+}
+
+export async function saveJeffKey(
+	input: string,
+	dir = statifyDir(),
+): Promise<void> {
+	await save(
+		join(dir, "statify-jeff.key"),
+		`${validKey(input, "Jeff")}\n`,
+		dir,
+	);
+}
+
+export async function removeJeffKey(dir = statifyDir()): Promise<void> {
+	try {
+		await unlink(join(dir, "statify-jeff.key"));
 	} catch (error) {
 		if (!missing(error)) throw error;
 	}

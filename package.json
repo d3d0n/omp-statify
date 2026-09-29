@@ -16,6 +16,7 @@
 		"src/manage.ts",
 		"src/settings.ts",
 		"README.md",
+		"mise.toml",
 		"docs/"
 	],
 	"repository": {
