@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -59,7 +59,28 @@ const MIN_LENGTH = 4_000;
 const CHUNK_LENGTH = 1_800;
 const MAX_QUESTIONS = 12;
 const MAX_READ = 8_000;
-const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// Three-word archive IDs; UUIDs name archives written by earlier Statify versions.
+const ID =
+	/^(?:[A-Z][a-z]+){3}$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// Each word is one o200k token, so an ID costs three model tokens.
+const WORDS =
+	`Air Amber Art Ash Ball Barn Basket Bay Beach Bean Bear Bee Bell Bench Berry
+Bike Bird Blue Boat Book Boot Bottle Bread Breakfast Brick Brook Brown Brush
+Burger Bush Butter Cafe Cake Candy Cape Car Castle Chair Cherry Chess
+Chicken Chocolate City Clay Clock Coal Coffee Coin Comb Compass Copper Cord
+Corn Cream Crow Cup Dance Day Desk Diamond Dice Dinner Dish Dock Dog Door
+Dragon Dust Earth Egg Fan Farm Fence Fern Festival Fig Film Fire Flower Fog
+Football Forest Fort Fox Galaxy Gallery Garden Gate Gift Glass Glow Gold
+Golf Grass Green Hammer Harvest Hat Heart Heather Helmet Hero Hill Holiday
+Honey Horn Horse Hotel House Ice Inn Iron Island Jam King Knight Lake Lamp
+Leather Lion Lunch Meteor Milk Mill Mint Mirror Mist Moon Morning Mountain
+Movie Mud Museum Music Night Nut Oak Ocean Orange Paint Palm Paper Park Peak
+Pear Pen Photo Pie Pier Pig Pink Pizza Plane Planet Plant Plate Pocket
+Prince Purple Puzzle Queen Rain Rainbow Red Ribbon Rice River Rock Roof Room
+Rose Sand Sea Seal Season Ship Shop Silver Sky Slate Slope Smile Snow Sock
+Soup Spark Star Steel Stone Storm Sugar Summer Sun Surf Tea Tent Thunder
+Tiger Torch Tower Toy Trail Tray Truck Tunnel Turkey Vest Villa Village Wall
+Wallet Water Wave Wind Wing Winter Wolf Wonder Wood Yellow`.split(/\s+/);
 const RANGE = /^([1-9]\d*)-([1-9]\d*)$/;
 const SECRET =
 	/-----BEGIN (?:[\w ]*PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----|\b(?:Bearer\s+[A-Za-z0-9._~-]{12,}|sk-or-v1-|sk-[A-Za-z0-9]{16}|gh[pousr]_[A-Za-z0-9]{20}|AKIA[0-9A-Z]{16})|\b(?:API_KEY|SECRET_KEY|PRIVATE_KEY|ACCESS_TOKEN|PASSWORD|OPENROUTER_API_KEY)\s*[:=]\s*\S+/i;
@@ -157,48 +178,42 @@ function chunks(text: string): Span[] {
 	return spans;
 }
 
-function ranges(spans: Pick<Span, "start" | "end">[]): string {
-	return spans.map(({ start, end }) => `${start}-${end}`).join(", ") || "none";
-}
-
-function omitted(
-	selected: Pick<Span, "start" | "end">[],
-	length: number,
-): Span[] {
-	const result: Span[] = [];
+/** Model-visible replacement: recovery header, verbatim shown text, and an exact marker per omitted range. */
+export function statifyReceipt(
+	text: string,
+	shown: Pick<Span, "start" | "end">[],
+	id: string,
+): string {
+	let display = `[statify: omitted ranges are marked below. Recover exact text: write xd://statify_read {"id":"${id}","range":"start-end"}; max ${MAX_READ} chars per call]\n`;
+	const omit = (start: number, end: number) => {
+		display += `${display.endsWith("\n") ? "" : "\n"}[statify omitted chars ${start}-${end}]\n`;
+	};
 	let cursor = 1;
-	for (const span of selected) {
-		if (cursor < span.start)
-			result.push({ start: cursor, end: span.start - 1, text: "" });
+	for (const span of shown) {
+		if (cursor < span.start) omit(cursor, span.start - 1);
+		display += text.slice(span.start - 1, span.end);
 		cursor = span.end + 1;
 	}
-	if (cursor <= length) result.push({ start: cursor, end: length, text: "" });
-	return result;
-}
-
-/** Stable receipt with exact archived offsets for the selected text. */
-export function statifyReceipt(
-	length: number,
-	selected: Pick<Span, "start" | "end">[],
-	id: string,
-	hash: string,
-): string {
-	return `statify archive ${id} (SHA-256 ${hash}; ${length} UTF-16 characters).\nShown: ${ranges(selected)}.\nOmitted: ${ranges(omitted(selected, length))}.\nTo recover exact omitted text, write to xd://statify_read with JSON content {"id":"${id}","range":"start-end"}; max ${MAX_READ} characters per call. Ranges are 1-based inclusive UTF-16 positions in the archived text, not source-file lines.\n`;
+	if (cursor <= text.length) omit(cursor, text.length);
+	return display;
 }
 
 /** Archive exactly the text that the tool_result handler received, before making any external request. */
 export async function archiveText(
 	directory: string,
 	text: string,
-): Promise<{ id: string; hash: string }> {
+): Promise<string> {
 	await mkdir(directory, { recursive: true, mode: 0o700 });
-	const id = randomUUID();
-	const hash = createHash("sha256").update(text, "utf8").digest("hex");
+	// ponytail: ~10.6M IDs per session; `wx` never overwrites, and a collision fails open (original kept). Retry if sessions reach thousands of archives.
+	const id = Array.from(
+		{ length: 3 },
+		() => WORDS[randomInt(WORDS.length)],
+	).join("");
 	await writeFile(join(directory, `${id}.txt`), text, {
 		flag: "wx",
 		mode: 0o600,
 	});
-	return { id, hash };
+	return id;
 }
 
 /** Ranges are inclusive 1-based UTF-16 positions in the archived extension-visible text. */
@@ -303,7 +318,7 @@ export async function statifyResult(
 		observe({ status: "bypass" });
 		return;
 	}
-	let archived: { id: string; hash: string } | undefined;
+	let archived: string | undefined;
 	let keepArchive = false;
 	try {
 		const url =
@@ -464,17 +479,8 @@ export async function statifyResult(
 			header && selected[0]?.start !== 1
 				? [{ start: 1, end: header.length, text: header }, ...selected]
 				: selected;
-		const shown = shownSpans
-			.map((span) => `[${span.start}-${span.end}]\n${span.text}`)
-			.join("\n");
 		if (!archived) return;
-		const receipt = statifyReceipt(
-			text.length,
-			shownSpans,
-			archived.id,
-			archived.hash,
-		);
-		const display = `${receipt}${shown}`;
+		const display = statifyReceipt(text, shownSpans, archived);
 		tokens = {
 			original: countTokens(text),
 			replacement: countTokens(display),
@@ -495,7 +501,7 @@ export async function statifyResult(
 	} finally {
 		if (archived && !keepArchive) {
 			try {
-				await rm(join(options.archive, `${archived.id}.txt`), { force: true });
+				await rm(join(options.archive, `${archived}.txt`), { force: true });
 			} catch {
 				// Cleanup failure must not hide the original tool result.
 			}
@@ -531,7 +537,7 @@ export async function statifyAssistantContext(
 			if (message.role !== "assistant" || message.content.length !== 1)
 				return message;
 			const part = message.content[0];
-			if (part?.type !== "text" || part.text.startsWith("statify archive "))
+			if (part?.type !== "text" || part.text.startsWith("[statify: "))
 				return message;
 			const text = part.text;
 			if (
@@ -2024,7 +2030,7 @@ export default function statify(pi: ExtensionAPI): void {
 	const readParams = pi.zod.object({
 		id: pi.zod
 			.string()
-			.describe("Archive UUID printed in the Statify omission receipt."),
+			.describe("Archive ID from the Statify receipt, e.g. CoinForestMilk."),
 		range: pi.zod
 			.string()
 			.describe(

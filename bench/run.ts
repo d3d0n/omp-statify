@@ -149,7 +149,7 @@ export async function prepareRun(
 	let recovered = false;
 	let retrievalError: string | undefined;
 	if (!visible && gold && mode === "replace" && result) {
-		const id = /statify archive ([0-9a-f-]{36})\b/.exec(display)?.[1];
+		const id = /^\[statify: [^\n]*"id":"([A-Za-z]+)"/.exec(display)?.[1];
 		const offset = item.toolOutput.indexOf(gold);
 		if (id && offset >= 0) {
 			try {

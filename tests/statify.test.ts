@@ -1,6 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as zod from "@oh-my-pi/omptype/zod";
@@ -37,6 +36,24 @@ const tool = (
 	content: [{ type: "text" as const, text }],
 });
 const longText = `${"irrelevant log line\n".repeat(110)}IMPORTANT: invoke repair() before restart\n${"irrelevant log line\n".repeat(110)}`;
+const receiptId = (display: string) =>
+	/^\[statify: [^\n]*"id":"([A-Za-z]+)"/.exec(display)?.[1];
+/** Rebuilds the original by replacing each omission marker with its exact archived range. */
+async function restore(dir: string, display: string): Promise<string> {
+	const id = receiptId(display);
+	if (!id) throw new Error("Receipt missing archive ID");
+	const body = display.slice(display.indexOf("\n") + 1);
+	const marker = /\[statify omitted chars (\d+)-(\d+)\]\n/g;
+	let text = "";
+	let last = 0;
+	for (;;) {
+		const match = marker.exec(body);
+		if (!match) return text + body.slice(last);
+		text += body.slice(last, match.index);
+		text += await readArchive(dir, id, `${match[1]}-${match[2]}`);
+		last = match.index + match[0].length;
+	}
+}
 
 function decisions(
 	scores: number[],
@@ -116,14 +133,11 @@ test("archives before request, selects verbatim fragments, and restores omitted 
 	expect(tokens?.original).toBeGreaterThan(tokens?.replacement ?? Infinity);
 	const receipt = result.content[0].text;
 	expect(receipt).toContain("IMPORTANT: invoke repair()");
-	expect(receipt).toContain("Shown: ");
-	expect(receipt).toContain("Omitted: ");
 	expect(receipt).not.toContain(longText);
-	const id = /statify archive ([\da-f-]+)/.exec(receipt)?.[1];
+	const id = receiptId(receipt);
 	if (!id) throw new Error("Receipt missing archive ID");
-	expect(receipt).toContain(
-		createHash("sha256").update(longText).digest("hex"),
-	);
+	expect(id).toMatch(/^(?:[A-Z][a-z]+){3}$/);
+	expect(await restore(store, receipt)).toBe(longText);
 	// A fresh reader, independent of the handler's process state, can retrieve the exact text.
 	const parts: string[] = [];
 	for (let start = 1; start <= longText.length; start += 8_000) {
@@ -142,6 +156,10 @@ test("archives before request, selects verbatim fragments, and restores omitted 
 	await expect(readArchive(store, "../other-session", "1-5")).rejects.toThrow(
 		"Invalid archive ID",
 	);
+	// Archives named before three-word IDs stay recoverable in resumed sessions.
+	const legacy = "3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b";
+	await writeFile(join(store, `${legacy}.txt`), "legacy archive");
+	expect(await readArchive(store, legacy, "1-6")).toBe("legacy");
 	await expect(readArchive(store, id, "1-8001")).rejects.toThrow(
 		"at most 8000",
 	);
@@ -185,20 +203,12 @@ test("irrelevant chunks are omitted without hiding an uncertain answer or OMP re
 	expect(display).not.toContain("\n1: unrelated setup\n");
 	expect(display).not.toContain("311: LAST unrelated tail");
 	expect(display.length).toBeLessThan(text.length);
-	expect(display).toContain(`Shown: 1-${header.length}, `);
+	// The read header stays in place, followed by the marker for the omitted first chunk.
+	expect(display).toContain(
+		`${header}[statify omitted chars ${header.length + 1}-`,
+	);
 	expect(original.content[0].text).toBe(text);
-	const id = /statify archive ([\da-f-]+)/.exec(display)?.[1];
-	if (!id) throw new Error("Receipt missing archive ID");
-	const parts: string[] = [];
-	for (let start = 1; start <= text.length; start += 8_000)
-		parts.push(
-			await readArchive(
-				dir,
-				id,
-				`${start}-${Math.min(text.length, start + 7_999)}`,
-			),
-		);
-	expect(parts.join("")).toBe(text);
+	expect(await restore(dir, display)).toBe(text);
 });
 
 test("a numbered Python declaration stays with its decorator, docstring, and body", async () => {
@@ -256,8 +266,9 @@ test("all-low chunks still have a receipt; shadow and non-shrinking results leav
 		...base,
 		fetcher: decisions([0.02, 0.02, 0.02]),
 	});
-	expect(none?.content[0].text).toContain(`Omitted: 1-${text.length}`);
-	expect(none?.content[0].text).toContain("Shown: none");
+	expect(none?.content[0].text).toContain(
+		`\n[statify omitted chars 1-${text.length}]\n`,
+	);
 	const shadow = join(dir, "shadow");
 	expect(
 		await statifyResult(tool(text), {
@@ -269,11 +280,14 @@ test("all-low chunks still have a receipt; shadow and non-shrinking results leav
 	).toBeUndefined();
 	await expect(readdir(shadow)).rejects.toThrow();
 	const noOp = join(dir, "no-op");
+	// Line breaks end chunks at 1095, 2190, and 3990, leaving a 10-character last chunk.
+	const line = (length: number) => `${"x".repeat(length)}\n`;
+	const short = line(1_094) + line(1_094) + line(1_799) + "z".repeat(10);
 	expect(
-		await statifyResult(tool("x".repeat(3600) + "z".repeat(400)), {
+		await statifyResult(tool(short), {
 			...base,
 			archive: noOp,
-			fetcher: decisions([0.99, 0.99, 0.01]),
+			fetcher: decisions([0.99, 0.99, 0.99, 0.01]),
 		}),
 	).toBeUndefined();
 	expect(await readdir(noOp)).toEqual([]);
@@ -281,7 +295,8 @@ test("all-low chunks still have a receipt; shadow and non-shrinking results leav
 
 test("a shorter receipt that costs more model tokens leaves the original output unchanged", async () => {
 	const dir = await archive();
-	const text = "a".repeat(10_800);
+	// Omitting dashes saves characters, but they tokenize more cheaply than the receipt.
+	const text = "word ".repeat(1_800) + "-".repeat(1_800);
 	const selected = Array.from({ length: 5 }, (_, i) => ({
 		start: i * 1_800 + 1,
 		end: (i + 1) * 1_800,
@@ -295,18 +310,7 @@ test("a shorter receipt that costs more model tokens leaves the original output 
 		fetcher: decisions([0.99, 0.99, 0.99, 0.99, 0.99, 0.01], async () => {
 			const [filename] = await readdir(dir);
 			if (!filename) throw new Error("Archive missing before decision");
-			const receipt = statifyReceipt(
-				text.length,
-				selected,
-				filename.slice(0, -4),
-				createHash("sha256").update(text).digest("hex"),
-			);
-			const display = `${receipt}${selected
-				.map(
-					({ start, end }) =>
-						`[${start}-${end}]\n${text.slice(start - 1, end)}`,
-				)
-				.join("\n")}`;
+			const display = statifyReceipt(text, selected, filename.slice(0, -4));
 			expect(display.length).toBeLessThan(text.length);
 			expect(countTokens(display)).toBeGreaterThan(countTokens(text));
 		}),
@@ -329,7 +333,7 @@ test("non-read tool output, including errors, is filtered and recoverable", asyn
 	const output = result.content[0].text;
 	expect(output).toContain("IMPORTANT: invoke repair()");
 	expect(output).not.toContain("irrelevant log line\n".repeat(100));
-	const id = /statify archive ([\da-f-]+)/.exec(output)?.[1];
+	const id = receiptId(output);
 	if (!id) throw new Error("Missing recovery ID");
 	expect(await readArchive(dir, id, `1-${longText.length}`)).toBe(longText);
 });
@@ -369,7 +373,7 @@ test("context filters past assistant prose without changing user or instruction 
 	expect(result[1]).toBe(messages[1]);
 	expect(result[2].content[0]).toHaveProperty(
 		"text",
-		expect.stringContaining("statify archive"),
+		expect.stringMatching(/^\[statify: /),
 	);
 	expect(
 		messages[2]?.role === "assistant" && messages[2].content[0],
@@ -510,8 +514,7 @@ test("Unicode boundaries reject half a surrogate, accept exact whole range", asy
 		mode: "replace",
 		fetcher: decisions([0.01, 0.99, 0.01]),
 	});
-	const id =
-		result && /statify archive ([\da-f-]+)/.exec(result.content[0].text)?.[1];
+	const id = result && receiptId(result.content[0].text);
 	if (!id) throw new Error("Receipt missing archive ID");
 	expect(await readArchive(dir, id, "1800-1801")).toBe("🦊");
 	await expect(readArchive(dir, id, "1800-1800")).rejects.toThrow(
@@ -560,7 +563,7 @@ test("Jeff accepts a local unauthenticated decision and preserves the archive", 
 	expect(result.content[0].text).not.toContain(
 		"irrelevant log line\n".repeat(100),
 	);
-	const id = /statify archive ([\da-f-]+)/.exec(result.content[0].text)?.[1];
+	const id = receiptId(result.content[0].text);
 	if (!id) throw new Error("Missing recovery ID");
 	expect(await readArchive(dir, id, `1-${longText.length}`)).toBe(longText);
 	expect(observation?.status).toBe("replaced");
