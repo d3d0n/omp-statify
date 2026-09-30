@@ -24,17 +24,21 @@ omp
 
 Use the same menu to edit or remove your key. Saving a key does not turn Statify on. Your key is stored locally, **not encrypted**; never paste it into ordinary chat.
 
-The statusline shows the provider and whether Statify is active or needs attention. Show or hide it from `/statify`. [Full setup and controls](docs/setup.md).
+The statusline at the bottom shows which provider is on, whether Jeff's server is ready, when a request is being processed, and how many tokens the last request used and saved. **paused** means Jeff isn't ready yet, so output passes through unchanged. Show or hide it from `/statify`. [Full setup and controls](docs/setup.md).
 
 ### Local Jeff (experimental)
 
 Requires an Apple Silicon Mac.
 
-1. Open `/statify` → **Jeff · local (experimental)** → **Install / setup Jeff**.
-2. Choose **Install / update pinned Jeff**. Review the trust prompt before approving downloads. If mise is missing, install it with `brew install mise` and retry.
-3. Run the server command shown by the installer in a **separate terminal** and keep it open. Back in OMP, choose **Check connection**, then **Enable Jeff (experimental)**.
+1. Open `/statify` → **Jeff · local (experimental)** → **Install / update Jeff**.
+2. Review the trust prompt before approving downloads. If mise is missing, install it with `brew install mise` and retry.
+3. Choose **Enable Jeff (experimental)** and confirm. Statify starts the local server in the background—no separate terminal needed—and stops it when Jeff is disabled or the last OMP window closes.
 
-Statify never starts the server automatically. For a different local address or a server key, use **Connection settings**. [Jeff setup and troubleshooting](docs/setup.md#jeff-experimental-local-provider).
+In the Jeff menu you can start, stop, or restart the server, view its logs, and switch to another server or port — for example, when the usual port is already taken.
+
+If the server keeps failing, choose **Reinstall Jeff**: after asking, it downloads Jeff again (about 2 GB). [Jeff setup and troubleshooting](docs/setup.md#jeff-experimental-local-provider).
+
+If setup or the server fails, ask OMP “why did Statify setup fail?” — the bundled **statify-troubleshooting** skill reads the logs.
 
 ## Measured results
 

@@ -10,6 +10,21 @@ import type {
 	ToolResultEvent,
 } from "@oh-my-pi/pi-coding-agent";
 import { countTokens } from "@oh-my-pi/pi-natives";
+import type { JeffServerInfo } from "./jeff-server";
+import {
+	acquireJeffLease,
+	capJeffLog,
+	freePort,
+	jeffInstalled,
+	jeffLogTail,
+	jeffServerPaths,
+	jeffServerState,
+	listJeffServers,
+	portOwner,
+	releaseJeffLease,
+	startJeffServer,
+	stopJeffServer,
+} from "./jeff-server";
 import { jeffSetupInstructions, setupJeff } from "./jeff-setup";
 import { promptKey } from "./key-input";
 import type { StatifySettings } from "./settings";
@@ -52,7 +67,8 @@ export type StatifyOptions = {
 	consent: boolean;
 	mode: "shadow" | "replace";
 	fetcher?: (url: string, init: RequestInit) => Promise<Response>;
-	observe?: (observation: StatifyObservation) => void;
+	observe?: (observation: StatifyObservation, requested: boolean) => void;
+	onRequest?: () => void;
 	record?: (metrics: {
 		characters: number;
 		scores: number[];
@@ -61,6 +77,7 @@ export type StatifyOptions = {
 };
 export type StatifyObservation = {
 	status: "bypass" | "api_error" | "shadow" | "no_op" | "replaced";
+	tokens?: { original: number; replacement: number };
 	httpStatus?: number;
 	usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number };
 	scores?: {
@@ -240,9 +257,10 @@ export async function statifyResult(
 	event: Result,
 	options: StatifyOptions,
 ): Promise<{ content: [{ type: "text"; text: string }] } | undefined> {
+	let requested = false;
 	const observe = (observation: StatifyObservation) => {
 		try {
-			options.observe?.(observation);
+			options.observe?.(observation, requested);
 		} catch {
 			// Benchmark observers must not affect tool results.
 		}
@@ -298,8 +316,14 @@ export async function statifyResult(
 		};
 		if (options.key) headers.Authorization = `Bearer ${options.key}`;
 		const signal = AbortSignal.timeout(15_000);
-		const request = () =>
-			(options.fetcher ?? fetch)(url, {
+		const request = () => {
+			requested = true;
+			try {
+				options.onRequest?.();
+			} catch {
+				// Observers must not affect provider requests.
+			}
+			return (options.fetcher ?? fetch)(url, {
 				method: "POST",
 				headers,
 				body: JSON.stringify({
@@ -309,6 +333,7 @@ export async function statifyResult(
 				}),
 				signal,
 			});
+		};
 		const response = await (provider === "jeff"
 			? serializeJeff(request)
 			: request());
@@ -335,8 +360,9 @@ export async function statifyResult(
 			costUsd: numeric("cost"),
 		};
 		let scoreSummary: StatifyObservation["scores"];
+		let tokens: StatifyObservation["tokens"];
 		const report = (status: StatifyObservation["status"]) =>
-			observe({ status, usage, scores: scoreSummary });
+			observe({ status, usage, scores: scoreSummary, tokens });
 		if (
 			!data ||
 			typeof data !== "object" ||
@@ -434,9 +460,13 @@ export async function statifyResult(
 			archived.hash,
 		);
 		const display = `${receipt}${shown}`;
+		tokens = {
+			original: countTokens(text),
+			replacement: countTokens(display),
+		};
 		if (
 			display.length >= text.length ||
-			countTokens(display) >= countTokens(text)
+			tokens.replacement >= tokens.original
 		) {
 			report("no_op");
 			return;
@@ -559,7 +589,11 @@ export default function statify(pi: ExtensionAPI): void {
 					authentication:
 						"authentication" in data && data.authentication === true,
 				};
-			} catch {
+			} catch (error) {
+				pi.logger.debug("statify jeff health", {
+					url,
+					error: error instanceof Error ? error.message : String(error),
+				});
 				return { status: "unreachable", authentication: false };
 			}
 		})();
@@ -568,6 +602,51 @@ export default function statify(pi: ExtensionAPI): void {
 	};
 	const providerName = (provider: StatifySettings["provider"]) =>
 		provider === "jev" ? "Jev" : "Jeff (experimental)";
+	const stats = new Map<
+		string,
+		{
+			inFlight: number;
+			saved: number;
+			last?: StatifyObservation;
+		}
+	>();
+	const tokenText = (value: number): string =>
+		value < 1000
+			? String(value)
+			: `${(value / (value < 1e6 ? 1000 : 1e6)).toFixed(1).replace(/\.0$/, "")}${value < 1e6 ? "k" : "M"}`;
+	const serverStatus = async (
+		ctx: ExtensionContext,
+		settings: StatifySettings,
+	) => {
+		const [server, managed] = await Promise.all([
+			health(ctx.sessionManager.getSessionId(), settings.jeffUrl),
+			jeffServerState().catch(() => ({ status: "stopped" as const })),
+		]);
+		const port = Number(new URL(settings.jeffUrl).port || "80");
+		const owner =
+			server.status === "unreachable" && managed.status !== "running"
+				? await portOwner(port).catch(() => undefined)
+				: undefined;
+		const status =
+			server.status !== "unreachable"
+				? managed.status === "running"
+					? server.status
+					: "external"
+				: owner
+					? `port ${port} busy`
+					: managed.status === "running"
+						? "starting"
+						: managed.status === "exited"
+							? "failed"
+							: jeffInstalled()
+								? "stopped"
+								: "not installed";
+		return { status, server, managed, owner };
+	};
+	const wanted = (settings: StatifySettings) =>
+		settings.enabled &&
+		settings.provider === "jeff" &&
+		(mode() === "replace" || mode() === "shadow");
 	const state = async (
 		ctx: ExtensionContext,
 		settings: StatifySettings,
@@ -576,40 +655,291 @@ export default function statify(pi: ExtensionAPI): void {
 		const currentMode = mode();
 		if (!currentMode) return "invalid mode";
 		if (currentMode === "record") return "record";
-		if (settings.provider === "jev")
-			return (await readKey()) ? currentMode : "add key";
-		const server = await health(
-			ctx.sessionManager.getSessionId(),
-			settings.jeffUrl,
-		);
-		if (server.status !== "ready")
-			return server.status === "unreachable" ? "offline" : "loading";
-		return server.authentication && !(await readJeffKey())
-			? "add Jeff key"
-			: currentMode;
+		let prefix = "";
+		if (settings.provider === "jev") {
+			if (!(await readKey())) return "add key";
+		} else {
+			const { status, server, managed } = await serverStatus(ctx, settings);
+			prefix =
+				status.startsWith("port ") || status === "not installed"
+					? status
+					: `server ${status === "external" ? server.status : status}`;
+			if (status === "starting" && managed.status === "running") {
+				const started = Date.parse(managed.record.startedAt);
+				if (Number.isFinite(started))
+					prefix += ` ${Math.max(0, Math.floor((Date.now() - started) / 1000))}s`;
+			}
+			if (server.status !== "ready") return `${prefix} · paused`;
+			if (server.authentication && !(await readJeffKey()))
+				return `${prefix} · add Jeff key`;
+			prefix += " · ";
+		}
+		const inFlight =
+			stats.get(ctx.sessionManager.getSessionId())?.inFlight ?? 0;
+		return `${prefix}${inFlight ? `classifying${inFlight > 1 ? ` ×${inFlight}` : ""}` : currentMode}`;
 	};
+	let refreshGeneration = 0;
 	const refreshStatus = async (ctx: ExtensionContext): Promise<void> => {
+		const generation = ++refreshGeneration;
 		try {
 			const settings = await readSettings();
 			if (!settings.statusline) {
-				ctx.ui.setStatus("statify", undefined);
+				if (generation === refreshGeneration)
+					ctx.ui.setStatus("statify", undefined);
 				return;
 			}
-			const current = await state(ctx, settings);
+			let current = await state(ctx, settings);
 			const idle = current === "off" || current === "record";
-			const active = current === "replace" || current === "shadow";
-			const color = idle ? "dim" : active ? "success" : "warning";
-			const name = settings.provider === "jev" ? "Jev" : "Jeff (exp)";
+			const busy = /starting|loading|classifying/.test(current);
+			const active = /(?:replace|shadow)$/.test(current);
+			const color = idle
+				? "dim"
+				: busy
+					? "accent"
+					: active
+						? "success"
+						: /failed|invalid/.test(current)
+							? "error"
+							: "warning";
+			const session = stats.get(ctx.sessionManager.getSessionId());
+			if (
+				settings.enabled &&
+				mode() !== "record" &&
+				session?.last &&
+				!current.endsWith(" · paused")
+			) {
+				const last = session.last;
+				const saved = last.tokens
+					? last.tokens.original - last.tokens.replacement
+					: 0;
+				current +=
+					last.status === "replaced"
+						? ` · last −${tokenText(saved)} tok`
+						: last.status === "api_error"
+							? " · last error"
+							: " · last kept";
+				if (
+					last.usage?.inputTokens !== undefined ||
+					last.usage?.outputTokens !== undefined
+				)
+					current += ` (${tokenText((last.usage.inputTokens ?? 0) + (last.usage.outputTokens ?? 0))} used)`;
+				if (session.saved > 0) current += ` · Σ −${tokenText(session.saved)}`;
+			}
+			if (generation !== refreshGeneration) return;
 			ctx.ui.setStatus(
 				"statify",
-				`${ctx.ui.theme.fg(color, idle ? "○" : active ? "●" : "!")} ${ctx.ui.theme.fg("dim", "Statify")} · ${ctx.ui.theme.fg("accent", name)} · ${ctx.ui.theme.fg(color, current)}`,
+				`${ctx.ui.theme.fg(color, idle ? "○" : busy ? "◐" : active ? "●" : "!")} ${ctx.ui.theme.fg("dim", "Statify")} · ${ctx.ui.theme.fg("accent", settings.provider === "jev" ? "Jev" : "Jeff")} · ${ctx.ui.theme.fg(color, current)}`,
 			);
 		} catch {
+			if (generation !== refreshGeneration) return;
 			ctx.ui.setStatus(
 				"statify",
 				ctx.ui.theme.fg("error", "! Statify · configuration error · /statify"),
 			);
 		}
+	};
+	let watcher: { timer: Timer; ctx: ExtensionContext } | undefined;
+	let watcherGeneration = 0;
+	const clearWatcher = () => {
+		watcherGeneration++;
+		if (watcher) watcher.ctx.clearTimer(watcher.timer);
+		watcher = undefined;
+	};
+	const stopServer = async (ctx: ExtensionContext, reason: string) => {
+		clearWatcher();
+		if (await stopJeffServer()) {
+			pi.logger.info("statify jeff server stopped", { reason });
+			ctx.ui.notify("Jeff managed server stopped.", "info");
+		}
+		healthCache.delete(ctx.sessionManager.getSessionId());
+		await refreshStatus(ctx);
+	};
+	const watchServer = (ctx: ExtensionContext) => {
+		clearWatcher();
+		const generation = watcherGeneration;
+		const started = Date.now();
+		let checking = false;
+		const timer = ctx.setInterval(async () => {
+			if (checking) return;
+			checking = true;
+			try {
+				await capJeffLog().catch(() => false);
+				healthCache.delete(ctx.sessionManager.getSessionId());
+				await refreshStatus(ctx);
+				const settings = await readSettings();
+				const { server, managed } = await serverStatus(ctx, settings);
+				if (generation !== watcherGeneration) return;
+				if (managed.status === "exited") {
+					clearWatcher();
+					const log = jeffServerPaths().log;
+					const tail = await jeffLogTail({ lines: 5 }).catch(() => "");
+					pi.logger.warn("statify jeff server exited", {
+						pid: managed.record.pid,
+						log,
+					});
+					ctx.ui.notify(
+						`Jeff server exited.\n${tail}\n${log}\nIf it keeps failing: /statify → Jeff → Reinstall Jeff.`,
+						"warning",
+					);
+				} else if (server.status === "ready") {
+					clearWatcher();
+					ctx.ui.notify("Jeff server ready", "info");
+				} else if (Date.now() - started >= 120_000) {
+					clearWatcher();
+					ctx.ui.notify(
+						"Jeff server still starting; open /statify → Jeff → Logs",
+						"warning",
+					);
+				}
+			} catch {
+				// Server/log failures must not break the session.
+				if (
+					generation === watcherGeneration &&
+					Date.now() - started >= 120_000
+				) {
+					clearWatcher();
+					ctx.ui.notify(
+						"Jeff server still starting; open /statify → Jeff → Logs",
+						"warning",
+					);
+				}
+			} finally {
+				checking = false;
+			}
+		}, 1000);
+		watcher = { timer, ctx };
+	};
+	const startServer = async (
+		ctx: ExtensionContext,
+		restart = false,
+		interactive = ctx.mode === "tui",
+	) => {
+		let settings = await readSettings();
+		if (!jeffInstalled()) {
+			ctx.ui.notify("Choose Install / update Jeff first.", "warning");
+			return;
+		}
+		if (restart) await stopServer(ctx, "restart");
+		healthCache.delete(ctx.sessionManager.getSessionId());
+		const { server, managed, owner } = await serverStatus(ctx, settings);
+		if (server.status !== "unreachable" && managed.status !== "running") return;
+		if (server.status === "unreachable" && managed.status !== "running") {
+			const port = Number(new URL(settings.jeffUrl).port || "80");
+			if (owner) {
+				const command = owner.command ?? "an unknown process";
+				if (!interactive) {
+					ctx.ui.notify(
+						`Port ${port} is used by ${command}. Open /statify → Jeff → Servers & ports to choose another port.`,
+						"warning",
+					);
+					return;
+				}
+				const servers = await discoverServers(settings);
+				const action = await ctx.ui.select(
+					`Port ${port} is used by ${command} (pid ${owner.pid ?? "unknown"})`,
+					[
+						"Use a random free port",
+						...(servers.length ? ["Choose a running Jeff server"] : []),
+						"Cancel",
+					],
+				);
+				if (action === "Choose a running Jeff server") {
+					await serversMenu(ctx);
+					return;
+				}
+				if (action !== "Use a random free port") return;
+				const jeffUrl = parseJeffUrl(`http://127.0.0.1:${await freePort()}`);
+				await saveSettings({ ...settings, jeffUrl });
+				settings = { ...settings, jeffUrl };
+				healthCache.delete(ctx.sessionManager.getSessionId());
+			}
+		}
+		if (managed.status !== "running") {
+			ctx.ui.notify("Starting Jeff server…", "info");
+			const result = await startJeffServer({ url: settings.jeffUrl });
+			if (result.status === "running")
+				pi.logger.info("statify jeff server started", {
+					pid: result.record.pid,
+					url: result.record.url,
+					log: jeffServerPaths().log,
+				});
+		}
+		watchServer(ctx);
+	};
+	const disable = async (ctx: ExtensionContext) => {
+		await saveSettings({ ...(await readSettings()), enabled: false });
+		await stopServer(ctx, "disabled");
+	};
+	const changeEndpoint = async (ctx: ExtensionContext, url: string) => {
+		const settings = await readSettings();
+		const jeffUrl = parseJeffUrl(url);
+		const managed = await jeffServerState().catch(() => ({
+			status: "stopped" as const,
+		}));
+		await saveSettings({ ...settings, jeffUrl });
+		healthCache.delete(ctx.sessionManager.getSessionId());
+		const server = await health(ctx.sessionManager.getSessionId(), jeffUrl);
+		const different =
+			managed.status === "running" && managed.record.url !== jeffUrl;
+		if (server.status !== "unreachable") {
+			if (different) await stopServer(ctx, "connected to another Jeff server");
+		} else if (different) {
+			await startServer(ctx, true);
+		} else if (wanted(settings)) {
+			await startServer(ctx);
+		}
+	};
+	const install = async (ctx: ExtensionContext, reinstall = false) => {
+		if (
+			await setupJeff(pi, ctx, {
+				reinstall,
+				beforeRemove: () => stopServer(ctx, "reinstall"),
+			})
+		) {
+			const settings = await readSettings();
+			if (settings.enabled && settings.provider === "jeff")
+				await startServer(ctx, true);
+		}
+	};
+	const logs = async (ctx: ExtensionContext, editor: boolean) => {
+		const paths = jeffServerPaths();
+		const text = `${paths.log}\n${await jeffLogTail({ lines: editor ? 80 : 20 }).catch(() => "")}\n\n${paths.setupLog}\n${await jeffLogTail({ file: "setup", lines: editor ? 80 : 20 }).catch(() => "")}`;
+		if (editor) await ctx.ui.editor("Jeff logs", text);
+		else ctx.ui.notify(text, "info");
+	};
+	const requestObservers = (
+		ctx: ExtensionContext,
+		provider: StatifySettings["provider"],
+	) => {
+		const id = ctx.sessionManager.getSessionId();
+		let session = stats.get(id);
+		if (!session) {
+			session = { inFlight: 0, saved: 0 };
+			stats.set(id, session);
+		}
+		return {
+			onRequest: () => {
+				session.inFlight++;
+				void refreshStatus(ctx);
+			},
+			observe: (observation: StatifyObservation, requested: boolean) => {
+				if (requested) {
+					session.inFlight = Math.max(0, session.inFlight - 1);
+					session.last = observation;
+					if (observation.status === "replaced" && observation.tokens)
+						session.saved +=
+							observation.tokens.original - observation.tokens.replacement;
+					void refreshStatus(ctx);
+				}
+				pi.logger.info("statify usage", {
+					provider,
+					status: observation.status,
+					inputTokens: observation.usage?.inputTokens ?? null,
+					outputTokens: observation.usage?.outputTokens ?? null,
+					costUsd: observation.usage?.costUsd ?? null,
+				});
+			},
+		};
 	};
 	const editKey = async (
 		provider: StatifySettings["provider"],
@@ -662,11 +992,8 @@ export default function statify(pi: ExtensionAPI): void {
 					ctx.sessionManager.getSessionId(),
 					settings.jeffUrl,
 				);
-				if (server.status !== "ready") {
-					ctx.ui.notify(
-						`Jeff is ${server.status}. Use Install / setup Jeff to start the server in a separate terminal, then Check connection.`,
-						"warning",
-					);
+				if (server.status === "unreachable" && !jeffInstalled()) {
+					ctx.ui.notify("Choose Install / update Jeff first.", "warning");
 					return;
 				}
 				if (
@@ -690,21 +1017,45 @@ export default function statify(pi: ExtensionAPI): void {
 			provider,
 			enabled: true,
 		});
+		if (provider === "jeff" && wanted(await readSettings()))
+			await startServer(ctx);
+		else
+			await stopServer(
+				ctx,
+				provider === "jev" ? "switched to Jev" : "record mode",
+			);
 	};
 	type MenuAction = {
 		label: string;
 		description: string;
 		run?: () => Promise<unknown>;
 	};
+	type MenuCursor = { label?: string; index: number };
 	const selectAction = async (
 		ctx: ExtensionContext,
 		title: string,
 		items: MenuAction[],
+		cursor: MenuCursor,
 	): Promise<boolean> => {
-		const selection = await ctx.ui.select(title, items);
-		const item = items.find((item) => item.label === selection);
+		const previous = items.findIndex((item) => item.label === cursor.label);
+		const selection = await ctx.ui.select(title, items, {
+			initialIndex:
+				previous >= 0 ? previous : Math.min(cursor.index, items.length - 1),
+		});
+		const index = items.findIndex((item) => item.label === selection);
+		if (index < 0) return false;
+		cursor.label = selection;
+		cursor.index = index;
+		const item = items[index];
 		if (!item?.run) return false;
-		await item.run();
+		try {
+			await item.run();
+		} catch (error) {
+			ctx.ui.notify(
+				error instanceof Error ? error.message : "Statify action failed",
+				"error",
+			);
+		}
 		await refreshStatus(ctx);
 		return true;
 	};
@@ -747,36 +1098,87 @@ export default function statify(pi: ExtensionAPI): void {
 		if (settings.enabled && settings.provider === provider)
 			return {
 				label: `Disable ${providerName(provider)}`,
-				description: "Stop subsequent classification; keep setup and key",
-				run: () => saveSettings({ ...settings, enabled: false }),
+				description:
+					provider === "jeff"
+						? "Stop filtering and the Statify-managed server; keep setup and key"
+						: "Stop subsequent classification; keep setup and key",
+				run: () => disable(ctx),
 			};
 		return {
 			label: `Enable ${providerName(provider)}`,
-			description: "Check setup and ask for consent before enabling",
+			description:
+				provider === "jeff"
+					? "Check setup, ask for consent, then start the local server automatically"
+					: "Check setup and ask for consent before enabling",
 			run: () => enableProvider(provider, ctx),
 		};
 	};
+	const discoverServers = (
+		settings: StatifySettings,
+	): Promise<JeffServerInfo[]> =>
+		listJeffServers({ urls: [settings.jeffUrl] }).catch(() => []);
+	const serverDescription = (server: JeffServerInfo): string =>
+		`${server.status} · ${server.managed ? "this profile" : `external${server.command ? ` · ${server.command}` : ""}${server.pid !== undefined ? ` pid ${server.pid}` : ""}`}`;
+	const editEndpoint = async (ctx: ExtensionContext) => {
+		const settings = await readSettings();
+		const url = await ctx.ui.input("Jeff endpoint", settings.jeffUrl);
+		if (url?.trim()) await changeEndpoint(ctx, url.trim());
+	};
+	const randomEndpoint = async (ctx: ExtensionContext) =>
+		changeEndpoint(ctx, `http://127.0.0.1:${await freePort()}`);
+	const serversMenu = async (ctx: ExtensionContext): Promise<void> => {
+		const cursor: MenuCursor = { index: 0 };
+		for (;;) {
+			const settings = await readSettings();
+			const servers = await discoverServers(settings);
+			if (
+				!(await selectAction(
+					ctx,
+					"Jeff · Servers & ports",
+					[
+						...servers.map((server) => ({
+							label: `127.0.0.1:${server.port}${server.url === settings.jeffUrl ? " ✓" : ""}`,
+							description: serverDescription(server),
+							run: () => changeEndpoint(ctx, server.url),
+						})),
+						{
+							label: "Random free port",
+							description: "Start a Statify-managed server on an unused port",
+							run: () => randomEndpoint(ctx),
+						},
+						{
+							label: "Enter endpoint…",
+							description: settings.jeffUrl,
+							run: () => editEndpoint(ctx),
+						},
+						{ label: "Back", description: "Return to Jeff" },
+					],
+					cursor,
+				))
+			)
+				return;
+		}
+	};
 	const connectionMenu = async (ctx: ExtensionContext): Promise<void> => {
+		const cursor: MenuCursor = { index: 0 };
 		for (;;) {
 			const settings = await readSettings();
 			const keySet = Boolean(await readJeffKey());
 			if (
-				!(await selectAction(ctx, "Jeff connection settings", [
-					{
-						label: "Edit endpoint",
-						description: settings.jeffUrl,
-						run: async () => {
-							const url = await ctx.ui.input("Jeff endpoint", settings.jeffUrl);
-							if (url?.trim())
-								await saveSettings({
-									...(await readSettings()),
-									jeffUrl: parseJeffUrl(url.trim()),
-								});
+				!(await selectAction(
+					ctx,
+					"Jeff connection settings",
+					[
+						{
+							label: "Edit endpoint",
+							description: settings.jeffUrl,
+							run: () => editEndpoint(ctx),
 						},
-					},
-					...keyActions("jeff", keySet, ctx),
-					{ label: "Back", description: "Return to Jeff setup" },
-				]))
+						...keyActions("jeff", keySet, ctx),
+						{ label: "Back", description: "Return to Jeff setup" },
+					],
+					cursor,
+				))
 			)
 				return;
 		}
@@ -786,19 +1188,27 @@ export default function statify(pi: ExtensionAPI): void {
 		ctx: ExtensionContext,
 	): Promise<void> => {
 		let connectionResult: JeffHealth | undefined;
+		const cursor: MenuCursor = { index: 0 };
 		for (;;) {
 			const settings = await readSettings();
 			const keySet = Boolean(
 				await (provider === "jev" ? readKey : readJeffKey)(),
 			);
 			const server =
-				provider === "jeff"
-					? await health(ctx.sessionManager.getSessionId(), settings.jeffUrl)
-					: undefined;
+				provider === "jeff" ? await serverStatus(ctx, settings) : undefined;
+			const enabled = settings.enabled && settings.provider === "jeff";
+			const servers =
+				provider === "jeff" ? await discoverServers(settings) : [];
+			const reinstallAction: MenuAction = {
+				label: "Reinstall Jeff",
+				description:
+					"Delete the local model and Python environment, then download again",
+				run: () => install(ctx, true),
+			};
 			const title =
 				provider === "jev"
 					? `Jev · OpenRouter · key ${keySet ? "saved" : "needed"}`
-					: `Jeff (experimental) · ${server?.status}${server?.authentication && !keySet ? " · key needed" : ""}${connectionResult ? ` · connection ${connectionResult.status}${connectionResult.authentication ? " · API key required" : ""}` : ""}`;
+					: `Jeff (experimental) · filtering ${enabled ? "on" : "off"} · server ${server?.status}${connectionResult ? ` · connection ${connectionResult.status}${connectionResult.authentication ? " · API key required" : ""}` : ""}`;
 			const items: MenuAction[] =
 				provider === "jev"
 					? [
@@ -816,12 +1226,53 @@ export default function statify(pi: ExtensionAPI): void {
 							},
 						]
 					: [
-							{
-								label: "Install / setup Jeff",
-								description:
-									"Apple Silicon · pinned local model · separate server terminal",
-								run: () => setupJeff(pi, ctx),
-							},
+							toggleAction(provider, settings, ctx),
+							...(enabled
+								? server?.status === "external"
+									? [
+											{
+												label: "External server",
+												description: `Running outside Statify at ${settings.jeffUrl}`,
+												run: async () =>
+													ctx.ui.notify(
+														"Statify does not stop external servers.",
+														"info",
+													),
+											},
+										]
+									: server?.managed.status === "running"
+										? [
+												{
+													label: "Stop server",
+													description:
+														"Keep Jeff selected; preserve originals until started again",
+													run: () => stopServer(ctx, "manual stop"),
+												},
+												{
+													label: "Restart server",
+													description: "Restart the managed local server",
+													run: () => startServer(ctx, true),
+												},
+											]
+										: [
+												{
+													label: "Start server",
+													description: "Start the installed local Jeff server",
+													run: () => startServer(ctx),
+												},
+												...(server?.status === "failed"
+													? [
+															{
+																label: "Restart server",
+																description:
+																	"Restart after the previous server exited",
+																run: () => startServer(ctx, true),
+															},
+														]
+													: []),
+											]
+								: []),
+							...(server?.status === "failed" ? [reinstallAction] : []),
 							{
 								label: "Check connection",
 								description: connectionResult
@@ -835,7 +1286,32 @@ export default function statify(pi: ExtensionAPI): void {
 									);
 								},
 							},
-							toggleAction(provider, settings, ctx),
+							{
+								label: "Servers & ports",
+								description: servers.length
+									? servers
+											.map(
+												(server) =>
+													`${server.port} ${server.managed ? "this profile" : "external"}`,
+											)
+											.join(" · ")
+									: "No Jeff servers running",
+								run: () => serversMenu(ctx),
+							},
+							{
+								label: "Logs",
+								description: "Managed server and sanitized installer logs",
+								run: () => logs(ctx, true),
+							},
+							{
+								label: "Install / update Jeff",
+								description:
+									"Apple Silicon · pinned local model · managed local server",
+								run: () => install(ctx),
+							},
+							...(server?.status !== "failed" && jeffInstalled()
+								? [reinstallAction]
+								: []),
 							{
 								label: "Connection settings",
 								description: "Loopback endpoint and optional Jeff API key",
@@ -843,10 +1319,11 @@ export default function statify(pi: ExtensionAPI): void {
 							},
 						];
 			items.push({ label: "Back", description: "Return to Statify" });
-			if (!(await selectAction(ctx, title, items))) return;
+			if (!(await selectAction(ctx, title, items, cursor))) return;
 		}
 	};
 	const menu = async (ctx: ExtensionContext): Promise<void> => {
+		const cursor: MenuCursor = { index: 0 };
 		for (;;) {
 			const settings = await readSettings();
 			const current = await state(ctx, settings);
@@ -872,7 +1349,7 @@ export default function statify(pi: ExtensionAPI): void {
 								: `Enable ${providerName(settings.provider)} after setup and consent`,
 							run: () =>
 								settings.enabled
-									? saveSettings({ ...settings, enabled: false })
+									? disable(ctx)
 									: enableProvider(settings.provider, ctx),
 						},
 						{
@@ -888,6 +1365,7 @@ export default function statify(pi: ExtensionAPI): void {
 								}),
 						},
 					],
+					cursor,
 				))
 			)
 				return;
@@ -904,36 +1382,60 @@ export default function statify(pi: ExtensionAPI): void {
 				if (ctx.mode === "tui") await menu(ctx);
 				else
 					ctx.ui.notify(
-						"Open /statify in interactive OMP for guided setup. Commands: /statify on|off|status|key add|edit|remove|jeff setup|provider jev|jeff|statusline on|off.",
+						"Open /statify in interactive OMP for guided setup. Commands: /statify on|off|status|key add|edit|remove|jeff setup|start|stop|restart|logs|servers|jeff-url <url>|random|provider jev|jeff|statusline on|off.",
 						"info",
 					);
 				return;
 			}
 			if (action === "jeff setup") {
-				if (ctx.mode === "tui") await setupJeff(pi, ctx);
+				if (ctx.mode === "tui") await install(ctx);
 				else {
 					ctx.ui.notify(jeffSetupInstructions(), "info");
 				}
 				return;
 			}
 			const settings = await readSettings();
-			if (action === "on" || action === "off")
-				await saveSettings({ ...settings, enabled: action === "on" });
-			else if (action === "statusline on" || action === "statusline off")
+			if (action === "on") await enableProvider(settings.provider, ctx);
+			else if (action === "off") await disable(ctx);
+			else if (action === "jeff logs") await logs(ctx, false);
+			else if (action === "jeff servers") {
+				const servers = await discoverServers(settings);
+				ctx.ui.notify(
+					servers.length
+						? servers
+								.map(
+									(server) =>
+										`${server.url}${server.url === settings.jeffUrl ? " ✓" : ""} · ${serverDescription(server)}`,
+								)
+								.join("\n")
+						: "No Jeff servers running",
+					"info",
+				);
+			} else if (
+				action === "jeff start" ||
+				action === "jeff stop" ||
+				action === "jeff restart"
+			) {
+				if (!(settings.enabled && settings.provider === "jeff"))
+					ctx.ui.notify("Enable Jeff before using server controls.", "warning");
+				else if (action === "jeff stop") await stopServer(ctx, "manual stop");
+				else await startServer(ctx, action === "jeff restart");
+			} else if (action === "statusline on" || action === "statusline off")
 				await saveSettings({
 					...settings,
 					statusline: action === "statusline on",
 				});
-			else if (action === "provider jev" || action === "provider jeff")
-				await saveSettings({
-					...settings,
-					provider: action === "provider jeff" ? "jeff" : "jev",
-				});
+			else if (action === "provider jev" || action === "provider jeff") {
+				const provider = action === "provider jeff" ? "jeff" : "jev";
+				if (settings.enabled && provider === "jeff")
+					await enableProvider(provider, ctx);
+				else {
+					await saveSettings({ ...settings, provider });
+					if (provider === "jev") await stopServer(ctx, "switched to Jev");
+				}
+			} else if (action === "jeff-url random") await randomEndpoint(ctx);
 			else if (action.startsWith("jeff-url "))
-				await saveSettings({
-					...settings,
-					jeffUrl: parseJeffUrl(input.trim().slice("jeff-url ".length)),
-				});
+				await changeEndpoint(ctx, input.trim().slice("jeff-url ".length));
 			else if (action === "key remove" || action === "jeff-key remove")
 				await removeStoredKey(action === "key remove" ? "jev" : "jeff");
 			else if (
@@ -957,12 +1459,10 @@ export default function statify(pi: ExtensionAPI): void {
 				const keySet = Boolean(
 					await (current.provider === "jev" ? readKey : readJeffKey)(),
 				);
-				const server =
-					current.provider === "jeff"
-						? await health(ctx.sessionManager.getSessionId(), current.jeffUrl)
-						: undefined;
+				const server = await serverStatus(ctx, current);
+				const paths = jeffServerPaths();
 				ctx.ui.notify(
-					`Statify · ${providerName(current.provider)} · ${await state(ctx, current)}\nKey: ${keySet ? "saved" : current.provider === "jev" ? "needed" : "not set (optional unless server requires auth)"} · mode: ${mode() ?? "invalid"} · statusline: ${current.statusline ? "visible" : "hidden"}${server ? `\nEndpoint: ${current.jeffUrl} · server: ${server.status}${server.authentication ? " · key required" : ""}` : ""}`,
+					`Statify · ${providerName(current.provider)} · ${await state(ctx, current)}\nKey: ${keySet ? "saved" : current.provider === "jev" ? "needed" : "not set (optional unless server requires auth)"} · mode: ${mode() ?? "invalid"} · statusline: ${current.statusline ? "visible" : "hidden"}\nEndpoint: ${current.jeffUrl} · server: ${server.status}${server.managed.status !== "stopped" ? ` · managed pid ${server.managed.record.pid}` : ""}${server.server.authentication ? " · key required" : ""}\nServer log: ${paths.log}\nSetup log: ${paths.setupLog}`,
 					"info",
 				);
 			}
@@ -977,9 +1477,38 @@ export default function statify(pi: ExtensionAPI): void {
 		description: "Choose Jev or Jeff and manage Statify",
 		handler: command,
 	});
-	pi.on("session_start", async (_event, ctx) => refreshStatus(ctx));
-	pi.on("turn_start", async (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
+		stats.set(ctx.sessionManager.getSessionId(), { inFlight: 0, saved: 0 });
 		healthCache.delete(ctx.sessionManager.getSessionId());
+		try {
+			await acquireJeffLease();
+			const settings = await readSettings();
+			if (wanted(settings)) {
+				const { server, managed } = await serverStatus(ctx, settings);
+				if (
+					server.status === "unreachable" &&
+					jeffInstalled() &&
+					managed.status !== "running"
+				)
+					await startServer(ctx, false, false);
+			}
+		} catch {
+			// Lifecycle failures must not break session startup.
+		}
+		await refreshStatus(ctx);
+	});
+	pi.on("turn_start", async (_event, ctx) => {
+		await capJeffLog().catch(() => false);
+		healthCache.delete(ctx.sessionManager.getSessionId());
+		try {
+			if (
+				!wanted(await readSettings()) &&
+				(await jeffServerState()).status === "running"
+			)
+				await stopServer(ctx, "Jeff no longer enabled");
+		} catch {
+			// CLI/profile changes and server failures fail open.
+		}
 		await refreshStatus(ctx);
 	});
 	const ephemeral = new Map<string, string>();
@@ -1045,14 +1574,7 @@ export default function statify(pi: ExtensionAPI): void {
 							jeffUrl: settings.jeffUrl,
 							consent: true,
 							mode: currentMode,
-							observe: ({ status, usage }) =>
-								pi.logger.info("statify usage", {
-									provider: settings.provider,
-									status,
-									inputTokens: usage?.inputTokens ?? null,
-									outputTokens: usage?.outputTokens ?? null,
-									costUsd: usage?.costUsd ?? null,
-								}),
+							...requestObservers(ctx, settings.provider),
 							record: (metrics) => pi.logger.info("statify decision", metrics),
 						},
 					);
@@ -1092,14 +1614,8 @@ export default function statify(pi: ExtensionAPI): void {
 					jeffUrl: settings.jeffUrl,
 					consent: true,
 					mode: currentMode,
-					observe: ({ status, usage }) =>
-						pi.logger.info("statify usage", {
-							provider: settings.provider,
-							status,
-							inputTokens: usage?.inputTokens ?? null,
-							outputTokens: usage?.outputTokens ?? null,
-							costUsd: usage?.costUsd ?? null,
-						}),
+					...requestObservers(ctx, settings.provider),
+					record: (metrics) => pi.logger.info("statify decision", metrics),
 				},
 				cache,
 			);
@@ -1154,14 +1670,30 @@ export default function statify(pi: ExtensionAPI): void {
 		},
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
-		ctx.ui.setStatus("statify", undefined);
-		const id = ctx.sessionManager.getSessionId();
-		assistantCache.delete(id);
-		healthCache.delete(id);
-		const dir = ephemeral.get(id);
-		if (dir) {
-			ephemeral.delete(id);
-			await rm(dir, { recursive: true, force: true });
+		clearWatcher();
+		try {
+			const id = ctx.sessionManager.getSessionId();
+			stats.delete(id);
+			assistantCache.delete(id);
+			healthCache.delete(id);
+			const dir = ephemeral.get(id);
+			if (dir) {
+				ephemeral.delete(id);
+				await rm(dir, { recursive: true, force: true });
+			}
+		} catch {
+			// Cleanup is best effort.
+		}
+		try {
+			if ((await releaseJeffLease()).last)
+				await stopServer(ctx, "last session exited");
+		} catch {
+			// Lease/server errors must never break shutdown.
+		}
+		try {
+			ctx.ui.setStatus("statify", undefined);
+		} catch {
+			// Cleanup is best effort.
 		}
 	});
 }

@@ -66,6 +66,8 @@ test("archives before request, selects verbatim fragments, and restores omitted 
 	const dir = await archive();
 	const store = join(dir, "session.jsonl.statify");
 	let calls = 0;
+	let requests = 0;
+	let tokens: { original: number; replacement: number } | undefined;
 	const fetcher = decisions([0.01, 0.99, 0.01], async (body) => {
 		calls++;
 		expect(body.model).toBe("typesafe/jev-1.13");
@@ -97,9 +99,19 @@ test("archives before request, selects verbatim fragments, and restores omitted 
 		consent: true,
 		mode: "replace",
 		fetcher,
+		onRequest: () => {
+			requests++;
+		},
+		observe: (observation) => {
+			tokens = observation.tokens;
+		},
 	});
 	expect(calls).toBe(1);
 	if (!result) throw new Error("Expected a selected result");
+	expect(requests).toBe(1);
+	expect(tokens?.original).toBe(countTokens(longText));
+	expect(tokens?.replacement).toBe(countTokens(result.content[0].text));
+	expect(tokens?.original).toBeGreaterThan(tokens?.replacement ?? Infinity);
 	const receipt = result.content[0].text;
 	expect(receipt).toContain("IMPORTANT: invoke repair()");
 	expect(receipt).toContain("Shown: ");
@@ -367,6 +379,7 @@ test("context filters past assistant prose without changing user or instruction 
 test("bypass keeps short, images, skill, plan, explicit full request, and suspected secrets local", async () => {
 	const dir = await archive();
 	let calls = 0;
+	let requests = 0;
 	const fetcher = async (
 		_url: string,
 		_init: RequestInit,
@@ -381,6 +394,9 @@ test("bypass keeps short, images, skill, plan, explicit full request, and suspec
 		consent: true,
 		mode: "replace" as const,
 		fetcher,
+		onRequest: () => {
+			requests++;
+		},
 	};
 	const variants = [
 		tool("short"),
@@ -425,6 +441,7 @@ test("bypass keeps short, images, skill, plan, explicit full request, and suspec
 		await statifyResult(tool(longText), { ...base, key: undefined }),
 	).toBeUndefined();
 	expect(calls).toBe(0);
+	expect(requests).toBe(0);
 	expect(await readdir(dir)).toEqual([]);
 });
 

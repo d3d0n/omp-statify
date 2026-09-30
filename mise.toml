@@ -46,8 +46,8 @@ uv run --no-sync hf download mstrasser/Jeff-Qwen3.5-0.8B --revision d66458d54426
 '''
 
 [tasks."jeff:serve"]
-description = "Run the local Jeff server (MLX, Jeff-Qwen3.5-0.8B) on 127.0.0.1:8765"
+description = "Run the local Jeff server (MLX, Jeff-Qwen3.5-0.8B) on 127.0.0.1:8765; set JEFF_PORT to change the port"
 run = '''
 cd "${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}"
-JEFF_BACKEND=mlx JEFF_CHECKPOINT=checkpoints/jeff-0.8b JEFF_HOST=127.0.0.1 PORT=8765 exec uv run --no-sync jeff-serve
+JEFF_BACKEND=mlx JEFF_CHECKPOINT=checkpoints/jeff-0.8b JEFF_HOST=127.0.0.1 PORT="${JEFF_PORT:-8765}" exec uv run --no-sync jeff-serve
 '''

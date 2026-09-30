@@ -11,9 +11,30 @@ OMP discovers the package's `src/index.ts` automatically from its plugin manifes
 
 ## Interactive controls
 
-Open `/statify` in OMP. The menu has four actions: **Jev · cloud**, **Jeff · local (experimental)**, **Enable/Disable Statify**, and **Show/Hide statusline**. Provider menus contain their setup and key controls. Escape goes back; Escape from the main menu closes it.
+Open `/statify` in OMP. The menu has four actions: **Jev · cloud**, **Jeff · local (experimental)**, **Enable/Disable Statify**, and **Show/Hide statusline**. Provider menus contain their setup and key controls. After an action, the cursor stays on the chosen item; if that item disappears, it stays at the nearest available position. This applies to the main, provider, and connection-settings menus. Escape goes back; Escape from the main menu closes it.
 
-Filtering starts **off**. The statusline is visible by default for new profiles; an existing visibility choice is preserved. It shows the provider, active mode, and problems such as a missing key, a loading server, or an offline server. It updates on session/turn start and after controls are used; use Jeff's **Check connection** to refresh readiness while idle—the result stays visible in the Jeff menu title and menu item. A saved key is not proof that the provider accepts it.
+Filtering starts **off**. The statusline is visible by default for new profiles; an existing visibility choice is preserved. Its format is `<icon> Statify · <Jev|Jeff> · <segments>`. `●` means active, `◐` means starting/loading or processing a request, `!` means attention is needed, and `○` means off or record mode. It shows the mode (`replace`, `shadow`, or `record`), missing-key or invalid-mode warnings, and Jeff's server state (`ready`, `loading`, `starting`, `stopped`, `failed`, or `not installed`). An external server appears as ready. While requests are in flight, `classifying` replaces the active mode, with `classifying ×N` for multiple requests.
+
+When Jeff is enabled in `replace` or `shadow` but not ready, the statusline ends in `· paused`: originals are kept. A managed startup shows elapsed seconds, updated every second; a blocked start shows `port N busy`.
+
+After a completed provider request, `last −<saved> tok` shows tokens saved by the latest replacement, `last kept` means no replacement (including shadow mode), and `last error` means the request failed. Every `last` segment appends `(<used> used)` when classifier input+output usage is known: for example, `last −1.6k tok (2.1k used)`, `last kept (493 used)`, or `last error (493 used)` when the provider returned usage. `Σ −<saved>` shows this session's total savings when positive. Counts use integers below 1,000, then compact `k`/`M` units. Bypassed output does not affect these stats; stats reset with each OMP session and are hidden when off or in record mode.
+
+Jeff reports input-token usage (output tokens are zero), so `(<used> used)` appears for Jeff too.
+
+Examples:
+
+```text
+○ Statify · Jev · off
+● Statify · Jev · replace · last −1.6k tok (2.1k used) · Σ −8.4k
+◐ Statify · Jeff · server starting 4s · paused
+! Statify · Jeff · server stopped · paused
+! Statify · Jeff · server failed · paused
+! Statify · Jeff · not installed · paused
+! Statify · Jeff · port 8765 busy · paused
+● Statify · Jeff · server ready · replace · last −920 tok (493 used) · Σ −3.1k
+```
+
+The statusline updates on session/turn start, after controls and provider requests, and while a managed server starts. Jeff's **Check connection** refreshes readiness while idle; the result stays visible in the Jeff menu title and item, and the cursor stays on **Check connection**. A saved key is not proof that the provider accepts it.
 
 ## Jev: add an OpenRouter key and enable
 
@@ -39,23 +60,40 @@ omp --statify-mode=record
 
 ## Jeff: experimental local provider
 
-1. Open `/statify` → **Jeff · local (experimental)** → **Install / setup Jeff**.
-2. Choose **Install / update pinned Jeff**. Installation currently supports Apple Silicon macOS. If mise is missing, install it with `brew install mise` and retry; do **not** install uv or Python through Homebrew.
-3. Inspect the absolute installed-plugin `mise.toml` named in the trust prompt. Approving explicitly trusts that file and runs its pinned installation tasks: mise installs uv, and uv installs Python, Jeff's locked dependencies, and the model. Canceling does not trust or install anything. A failed command stops installation and reports the failure; it never launches the server or enables filtering.
-4. Run the displayed `jeff:serve` command in a **separate, persistent terminal** and keep it open. Statify never starts the server automatically.
-5. Back in Jeff's menu, choose **Check connection**. Once the server is ready, choose **Enable Jeff (experimental)** and confirm. No OpenRouter key is needed.
+1. Open `/statify` → **Jeff · local (experimental)** → **Install / update Jeff**.
+2. Installation currently supports Apple Silicon macOS. If mise is missing, install it with `brew install mise` and retry; do **not** install uv or Python through Homebrew.
+3. Inspect the absolute installed-plugin `mise.toml` named in the trust prompt. Approving explicitly trusts that file and runs its pinned installation tasks: mise installs uv, and uv installs Python, Jeff's locked dependencies, and the model. Canceling does not trust or install anything. A failed command stops installation and reports the failure with the setup log path; installation alone does not enable filtering.
+4. Choose **Enable Jeff (experimental)** and confirm. Statify starts the installed local server in the background and reports when it is ready. No separate terminal or OpenRouter key is needed.
+
+When enabled in `replace` or `shadow` mode, Jeff starts automatically on OMP session startup if no server is reachable. Disabling Statify/Jeff or switching to Jev stops the managed server; closing the last OMP window using the profile also stops it. A successful install/update while Jeff is enabled restarts it. A server started outside Statify is external and is **never stopped by Statify**.
+
+While Jeff is enabled, its menu offers **Start server**, **Stop server**, and **Restart server** as appropriate. Stopping the server keeps Jeff selected; output stays unchanged until you start it again. **Check connection** reports readiness. **Logs** opens the server and setup log tails, each headed by its absolute path. If startup fails or takes more than two minutes, Statify points you to the logs.
+
+Logs live in the active profile directory (`~/.omp/agent/` by default, or `PI_CODING_AGENT_DIR`): `statify-jeff-server.log` contains server output and is replaced at each start; `statify-jeff-setup.log` contains the sanitized installer transcript and is replaced at each install attempt. These files use mode `0600`. Server ownership is recorded in `statify-jeff-server.json`; `statify-jeff-leases/` tracks OMP windows sharing the profile. `/statify status` includes server state (and the managed server's PID) and both log paths. If setup or the server fails, ask OMP “why did Statify setup fail?” — the bundled **statify-troubleshooting** skill reads these logs and OMP's logs.
 
 The installer uses the packaged `mise.toml` rather than requiring a Statify checkout or global Jeff/Python installation. It pins uv 0.12.19, Python 3.14, Jeff's server revision and the 0.8B model revision. The Jeff checkout lives under `${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}`; if overriding `JEFF_DIR`, keep the same environment for installation and serving.
 
-**Connection settings** contains **Edit endpoint** and masked **Add/Edit/Remove API key** controls. The endpoint defaults to `http://127.0.0.1:8765`; only HTTP `127.0.0.1` with an explicit port is accepted. Jeff's key is optional unless the server was started with `JEFF_API_KEY`; in that case save the same key to this OMP profile. It is separate from Jev's OpenRouter key.
+**Servers & ports**, after **Check connection**, lists discovered running Jeff servers with their port, `ready`/`loading` state, and **this profile** or **external** label (plus process details when available). The current endpoint has a check mark; selecting a server connects to it. **Random free port** selects an unused local port and starts a managed server when Jeff is enabled; **Enter endpoint…** accepts a local address. The submenu preserves the cursor after actions.
 
-`/statify jeff setup` opens the installer in interactive OMP. The standalone `statify jeff setup` and headless/RPC command instead print absolute manual trust/install/serve instructions. `/statify jeff-key add|edit` opens masked entry in interactive OMP and gives a profile-scoped terminal fallback otherwise. `/statify provider jeff`, `/statify on`, and `/statify jeff-url <url>` remain direct command alternatives.
+Before starting on an occupied port, an explicit interactive action offers **Use a random free port**, **Choose a running Jeff server** (when any are found), or **Cancel**. Automatic session startup and headless commands instead warn without starting; open **Servers & ports** or use `/statify jeff-url random`.
+
+**Reinstall Jeff** is available when Jeff is installed or the server failed, and is offered after server failures. It asks confirmation before deleting only `<jeffDir>/.venv` and `<jeffDir>/checkpoints/jeff-0.8b`, then runs the pinned installation again with an approximately 2 GB download; the checkout, other checkpoints, and shared caches are not removed. Statify stops its managed server first and starts it after a successful reinstall when Jeff is enabled.
+
+While running, server logs above 1 MiB are trimmed to the last 256 KiB, starting at a full line, with a `[statify: log trimmed at <ISO time>]` marker. This expected notice is not an error.
+
+**Connection settings** contains **Edit endpoint** and masked **Add/Edit/Remove API key** controls. The endpoint defaults to `http://127.0.0.1:8765`; only HTTP `127.0.0.1` with an explicit port is accepted. Changing the endpoint saves it: if Jeff already serves the new address, Statify stops this profile's managed server on a different address and connects without starting another; otherwise it restarts a managed server from a different address, or starts one when Jeff is enabled in `replace`/`shadow`. External servers are never stopped. Jeff's key is optional unless the server was started with `JEFF_API_KEY`; in that case save the same key to this OMP profile. It is separate from Jev's OpenRouter key.
+
+`/statify jeff setup` opens the installer in interactive OMP. The standalone `statify jeff setup` and headless/RPC command instead print absolute manual trust/install/serve instructions: review and run the printed trust, uv installation, and `jeff:setup` commands, then return to OMP and enable Jeff for managed background serving (or run `statify provider jeff && statify on` for the same profile). OMP starts the server automatically and stops it when Jeff is disabled or the last OMP session exits. The printed foreground serve command is an optional manual alternative; for a nondefault port, set `JEFF_PORT` to the port in the configured endpoint (default `8765`). Statify does not stop this external server.
+
+`/statify jeff start|stop|restart|logs` provides direct server controls in interactive or headless/RPC OMP; `logs` reports the last 20 lines and log paths. `/statify jeff-key add|edit` opens masked entry in interactive OMP and gives a profile-scoped terminal fallback otherwise. `/statify provider jeff`, `/statify on`, and `/statify jeff-url <url>` remain direct command alternatives.
+
+For interactive or headless/RPC OMP, `/statify jeff servers` lists running Jeff servers and `/statify jeff-url random` selects a free port (and starts Jeff when enabled). `/statify jeff-url <url>` uses the same endpoint-change behavior as the menu.
 
 Jeff is experimental. See the [paired code test](benchmarks.md#paired-jev--local-jeff-08b-relevance-and-latency) and [Jeff research](jeff.md) for evaluation results and limitations. Both providers use `replace` after explicit enablement unless a launch flag selects another mode. See [local inference](local-inference.md) for manual serving and cleanup.
 
 ## Manage or remove access
 
-Use `/statify` for setup, key management, enable/disable, and statusline visibility. `/statify status` shows detailed state without printing keys. Direct OMP commands remain available: `on|off`, `provider jev|jeff`, `key add|edit|remove`, `jeff-key add|edit|remove`, `jeff setup`, `jeff-url <url>`, and `statusline on|off`. When `statify` is on your `PATH`, equivalent terminal commands include:
+Use `/statify` for setup, key management, enable/disable, and statusline visibility. `/statify status` shows detailed state without printing keys. Direct OMP commands remain available: `on|off`, `provider jev|jeff`, `key add|edit|remove`, `jeff-key add|edit|remove`, `jeff setup|start|stop|restart|logs|servers`, `jeff-url <url>|random`, and `statusline on|off`. When `statify` is on your `PATH`, terminal management commands include:
 
 ```sh
 statify status
@@ -80,4 +118,4 @@ Keys are plaintext, **not encrypted**, in the active OMP agent directory: `stati
 
 ## Plugin loading
 
-`omp plugin install github:d3d0n/omp-statify#<tag>` installs and registers the extension in OMP's plugin directory; plugin installation is shared across profiles, while Statify settings and keys belong to the active agent profile. Restart OMP after installation; `/statify status` confirms that the extension loaded. Avoid installing and explicitly loading the source file at the same time. `omp plugin uninstall omp-statify` removes the plugin; it does **not** stop a separately running Jeff server, revoke an OpenRouter key, or delete Statify's settings/key files. Stop Jeff in its serving terminal; inspect the Jeff directory and shared caches before removing downloaded data as described in [local inference cleanup](local-inference.md#remove).
+`omp plugin install github:d3d0n/omp-statify#<tag>` installs and registers the extension in OMP's plugin directory; plugin installation is shared across profiles, while Statify settings and keys belong to the active agent profile. Restart OMP after installation; `/statify status` confirms that the extension loaded. Avoid installing and explicitly loading the source file at the same time. Before uninstalling, disable Jeff or use `/statify jeff stop` to stop the managed server. `omp plugin uninstall omp-statify` removes the plugin; it does **not** stop an external Jeff server, revoke an OpenRouter key, or delete Statify's settings/key files. Stop an optional manually served Jeff instance yourself; inspect the Jeff directory and shared caches before removing downloaded data as described in [local inference cleanup](local-inference.md#remove).
