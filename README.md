@@ -24,7 +24,7 @@ omp
 
 Use the same menu to edit or remove your key. Saving a key does not turn Statify on. Your key is stored locally, **not encrypted**; never paste it into ordinary chat.
 
-The statusline at the bottom shows which provider is on, whether Jeff's server is ready, when a request is being processed, and how many tokens the last request used and saved. **paused** means Jeff isn't ready yet, so output passes through unchanged. Show or hide it from `/statify`. [Full setup and controls](docs/setup.md).
+The statusline at the bottom shows which provider is on, whether Jeff's server is ready, when a request is being processed, and how many tokens the last request used and saved. The session total is saved with the OMP session, so it continues after `/resume` or restarting OMP; `/statify status` shows this session's totals. **paused** means Jeff isn't ready yet, so output passes through unchanged. Show or hide it from `/statify`. [Full setup and controls](docs/setup.md).
 
 ### Local Jeff (experimental)
 

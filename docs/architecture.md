@@ -32,9 +32,19 @@ When Jeff is wanted (`enabled`, provider Jeff, mode `replace`/`shadow`) but not 
 ○ Statify · Jeff 0.8B · off · ↓ 2B 43%
 ```
 
-After at least one completed provider request this session, enabled non-record statuslines show `last −<saved> tok` for a replacement, `last kept` for no-op/shadow, or `last error` for an API error. Every `last` segment appends `(<used> used)` when classifier input+output usage is known: for example, `last −1.6k tok (2.1k used)`, `last kept (493 used)`, or `last error (493 used)` when the provider returned usage. `Σ −<sessionSaved>` appears when positive. Saved tokens are the local estimate difference `countTokens(original) − countTokens(replacement)`, including the displayed receipt, not billed savings or classifier usage deducted from savings. Counts use integer, `k`, or `M` formatting (for example `920`, `1.6k`, `12k`). Session start resets stats; request completion, session/turn start, controls, and the startup watcher refresh the display. **Check connection** explicitly refreshes local health while idle.
+After a completed provider request since session start or switch, enabled non-record statuslines show `last −<saved> tok` for a replacement, `last kept` for no-op/shadow, or `last error` for an API error. Every `last` segment appends `(<used> used)` when classifier input+output usage is known: for example, `last −1.6k tok (2.1k used)`, `last kept (493 used)`, or `last error (493 used)` when the provider returned usage. `Σ −<sessionSaved>` appears when positive, including restored savings. Saved tokens are the local estimate difference `countTokens(original) − countTokens(replacement)`, including the displayed receipt, not billed savings or classifier usage deducted from savings. Counts use integer, `k`, or `M` formatting (for example `920`, `1.6k`, `12k`). Session start or switch clears only the transient last-request and in-flight state; request completion, session/turn start, controls, and the startup watcher refresh the display. **Check connection** explicitly refreshes local health while idle.
 
 Jeff supplies input-token usage and zero output tokens, so its completed requests show `(<used> used)` too.
+
+### Session statistics persistence
+
+Statify keeps totals and pending deltas per session in memory, updating both for every completed provider request; bypasses do not count. At `agent_end` (once per user prompt run) and `session_shutdown` (before cleanup), it writes the current session's pending deltas with `pi.appendEntry("statify-stats", data)` only when `pending.requests > 0`, then clears pending after a successful write. Hook write failures never throw.
+
+Version 1 data is `{ v: 1, requests, replaced, kept, errors, saved, used }`: completed provider requests; replacements; no-op or shadow results; API errors; original minus replacement tokens for replacements; and reported classifier input+output tokens, respectively. These are deltas since the last persisted entry, not cumulative totals.
+
+On `session_start` and `session_switch`, Statify sums valid version 1 `statify-stats` custom entries from `ctx.sessionManager.getEntries()` across all branches, ignoring malformed data and other versions, and resets pending, in-flight, and last-request state. `/resume` and OMP restarts therefore retain session totals; `/new` starts at zero. `/statify status` shows those totals in its **This session** line.
+
+Custom entries are stored with the OMP session and never sent to the LLM. Statistics create no extra files and are removed with the session; ephemeral sessions keep them only in memory.
 
 ## Managed Jeff lifecycle and diagnostics
 

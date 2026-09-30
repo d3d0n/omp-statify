@@ -17,9 +17,11 @@ Filtering starts **off**. The statusline is visible by default for new profiles;
 
 When Jeff is enabled in `replace` or `shadow` but not ready, the statusline shows `· paused`: originals are kept. If the environment exists but the selected model is missing, it shows `model not downloaded · paused`. A managed startup shows elapsed seconds, updated every second; a blocked start shows `port N busy`. A background model download appends `· ↓ <short> <pct>%` in any state, refreshed every second.
 
-After a completed provider request, `last −<saved> tok` shows tokens saved by the latest replacement, `last kept` means no replacement (including shadow mode), and `last error` means the request failed. Every `last` segment appends `(<used> used)` when classifier input+output usage is known: for example, `last −1.6k tok (2.1k used)`, `last kept (493 used)`, or `last error (493 used)` when the provider returned usage. `Σ −<saved>` shows this session's total savings when positive. Counts use integers below 1,000, then compact `k`/`M` units. Bypassed output does not affect these stats; stats reset with each OMP session and are hidden when off or in record mode.
+After a completed provider request, `last −<saved> tok` shows tokens saved by the latest replacement, `last kept` means no replacement (including shadow mode), and `last error` means the request failed. Every `last` segment appends `(<used> used)` when classifier input+output usage is known: for example, `last −1.6k tok (2.1k used)`, `last kept (493 used)`, or `last error (493 used)` when the provider returned usage. `Σ −<saved>` shows saved tokens for this session when positive; the total is restored on `/resume` or after restarting OMP, while `/new` starts at zero. Counts use integers below 1,000, then compact `k`/`M` units. Bypassed output does not affect these stats; statusline stats are hidden when off or in record mode.
 
 Jeff reports input-token usage (output tokens are zero), so `(<used> used)` appears for Jeff too.
+
+`/statify status` includes `This session: <requests> requests · saved <saved> tokens · classifier used <used> · replaced <replaced>, kept <kept>, errors <errors>`. Requests count completed provider requests, excluding bypasses; saved is the token reduction from replacements, and classifier used is reported input+output usage across Jev and Jeff. Replaced counts replacements, kept counts no-op or shadow results, and errors counts API errors. Token totals use the same compact formatting as the statusline.
 
 Examples:
 

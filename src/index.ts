@@ -628,14 +628,70 @@ export default function statify(pi: ExtensionAPI): void {
 		const pct = Math.floor((await download.progress().catch(() => 0)) * 100);
 		return modelDownload === download ? { id: download.id, pct } : undefined;
 	};
+	type SessionTotals = {
+		requests: number;
+		replaced: number;
+		kept: number;
+		errors: number;
+		saved: number;
+		used: number;
+	};
+	const zeroTotals = (): SessionTotals => ({
+		requests: 0,
+		replaced: 0,
+		kept: 0,
+		errors: 0,
+		saved: 0,
+		used: 0,
+	});
 	const stats = new Map<
 		string,
 		{
 			inFlight: number;
-			saved: number;
+			totals: SessionTotals;
+			pending: SessionTotals;
 			last?: StatifyObservation;
 		}
 	>();
+	const restoreStats = (ctx: ExtensionContext) => {
+		const totals = zeroTotals();
+		try {
+			for (const entry of ctx.sessionManager.getEntries()) {
+				if (entry.type !== "custom" || entry.customType !== "statify-stats")
+					continue;
+				const data = entry.data as Record<string, unknown> | null;
+				if (data?.v !== 1) continue;
+				const keys = Object.keys(totals) as (keyof SessionTotals)[];
+				if (
+					!keys.every(
+						(key) =>
+							typeof data[key] === "number" &&
+							Number.isFinite(data[key]) &&
+							(data[key] as number) >= 0,
+					)
+				)
+					continue;
+				for (const key of keys) totals[key] += data[key] as number;
+			}
+		} catch {
+			// Session statistics must never prevent startup or switching.
+		}
+		stats.set(ctx.sessionManager.getSessionId(), {
+			inFlight: 0,
+			totals,
+			pending: zeroTotals(),
+		});
+	};
+	const flushStats = (ctx: ExtensionContext) => {
+		try {
+			const session = stats.get(ctx.sessionManager.getSessionId());
+			if (!session || session.pending.requests === 0) return;
+			pi.appendEntry("statify-stats", { v: 1, ...session.pending });
+			session.pending = zeroTotals();
+		} catch {
+			// Keep pending deltas for the next flush if persistence fails.
+		}
+	};
 	const tokenText = (value: number): string =>
 		value < 1000
 			? String(value)
@@ -760,8 +816,9 @@ export default function statify(pi: ExtensionAPI): void {
 					last.usage?.outputTokens !== undefined
 				)
 					current += ` (${tokenText((last.usage.inputTokens ?? 0) + (last.usage.outputTokens ?? 0))} used)`;
-				if (session.saved > 0) current += ` · Σ −${tokenText(session.saved)}`;
 			}
+			if (session && session.totals.saved > 0)
+				current += ` · Σ −${tokenText(session.totals.saved)}`;
 			const progress = await downloadProgress();
 			if (progress)
 				current += ` · ↓ ${findJeffModel(progress.id)?.short ?? progress.id} ${progress.pct}%`;
@@ -1043,7 +1100,7 @@ export default function statify(pi: ExtensionAPI): void {
 		const id = ctx.sessionManager.getSessionId();
 		let session = stats.get(id);
 		if (!session) {
-			session = { inFlight: 0, saved: 0 };
+			session = { inFlight: 0, totals: zeroTotals(), pending: zeroTotals() };
 			stats.set(id, session);
 		}
 		return {
@@ -1055,9 +1112,26 @@ export default function statify(pi: ExtensionAPI): void {
 				if (requested) {
 					session.inFlight = Math.max(0, session.inFlight - 1);
 					session.last = observation;
-					if (observation.status === "replaced" && observation.tokens)
-						session.saved +=
-							observation.tokens.original - observation.tokens.replacement;
+					const delta: SessionTotals = {
+						requests: 1,
+						replaced: observation.status === "replaced" ? 1 : 0,
+						kept:
+							observation.status === "no_op" || observation.status === "shadow"
+								? 1
+								: 0,
+						errors: observation.status === "api_error" ? 1 : 0,
+						saved:
+							observation.status === "replaced" && observation.tokens
+								? observation.tokens.original - observation.tokens.replacement
+								: 0,
+						used:
+							(observation.usage?.inputTokens ?? 0) +
+							(observation.usage?.outputTokens ?? 0),
+					};
+					for (const key of Object.keys(delta) as (keyof SessionTotals)[]) {
+						session.totals[key] += delta[key];
+						session.pending[key] += delta[key];
+					}
 					void refreshStatus(ctx);
 				}
 				pi.logger.info("statify usage", {
@@ -1767,8 +1841,10 @@ export default function statify(pi: ExtensionAPI): void {
 				const server = await serverStatus(ctx, current);
 				const paths = jeffServerPaths();
 				const progress = await downloadProgress();
+				const totals =
+					stats.get(ctx.sessionManager.getSessionId())?.totals ?? zeroTotals();
 				ctx.ui.notify(
-					`Statify · ${providerName(current.provider)} · ${await state(ctx, current)}\nKey: ${keySet ? "saved" : current.provider === "jev" ? "needed" : "not set (optional unless server requires auth)"} · mode: ${mode() ?? "invalid"} · statusline: ${current.statusline ? "visible" : "hidden"}\nModel: ${modelLabel(current.jeffModel)} (${jeffModelInstalled(current.jeffModel) ? "downloaded" : "not downloaded"})${progress ? `\nDownloading ${modelLabel(progress.id)} · ${progress.pct}%` : ""}\nEndpoint: ${current.jeffUrl} · server: ${server.status}${server.managed.status !== "stopped" ? ` · managed pid ${server.managed.record.pid}` : ""}${server.server.authentication ? " · key required" : ""}\nServer log: ${paths.log}\nSetup log: ${paths.setupLog}`,
+					`Statify · ${providerName(current.provider)} · ${await state(ctx, current)}\nThis session: ${tokenText(totals.requests)} request${totals.requests === 1 ? "" : "s"} · saved ${tokenText(totals.saved)} tokens · classifier used ${tokenText(totals.used)} · replaced ${tokenText(totals.replaced)}, kept ${tokenText(totals.kept)}, errors ${tokenText(totals.errors)}\nKey: ${keySet ? "saved" : current.provider === "jev" ? "needed" : "not set (optional unless server requires auth)"} · mode: ${mode() ?? "invalid"} · statusline: ${current.statusline ? "visible" : "hidden"}\nModel: ${modelLabel(current.jeffModel)} (${jeffModelInstalled(current.jeffModel) ? "downloaded" : "not downloaded"})${progress ? `\nDownloading ${modelLabel(progress.id)} · ${progress.pct}%` : ""}\nEndpoint: ${current.jeffUrl} · server: ${server.status}${server.managed.status !== "stopped" ? ` · managed pid ${server.managed.record.pid}` : ""}${server.server.authentication ? " · key required" : ""}\nServer log: ${paths.log}\nSetup log: ${paths.setupLog}`,
 					"info",
 				);
 			}
@@ -1785,7 +1861,7 @@ export default function statify(pi: ExtensionAPI): void {
 	});
 	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
-		stats.set(ctx.sessionManager.getSessionId(), { inFlight: 0, saved: 0 });
+		restoreStats(ctx);
 		healthCache.delete(ctx.sessionManager.getSessionId());
 		try {
 			await acquireJeffLease();
@@ -1808,6 +1884,15 @@ export default function statify(pi: ExtensionAPI): void {
 			// Lifecycle failures must not break session startup.
 		}
 		await refreshStatus(ctx);
+	});
+	pi.on("session_switch", async (_event, ctx) => {
+		shuttingDown = false;
+		restoreStats(ctx);
+		healthCache.delete(ctx.sessionManager.getSessionId());
+		await refreshStatus(ctx);
+	});
+	pi.on("agent_end", async (_event, ctx) => {
+		flushStats(ctx);
 	});
 	pi.on("turn_start", async (_event, ctx) => {
 		await capJeffLog().catch(() => false);
@@ -1982,6 +2067,7 @@ export default function statify(pi: ExtensionAPI): void {
 		},
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
+		flushStats(ctx);
 		shuttingDown = true;
 		refreshGeneration++;
 		clearWatcher();

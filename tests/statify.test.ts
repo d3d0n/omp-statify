@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as zod from "@oh-my-pi/omptype/zod";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { countTokens } from "@oh-my-pi/pi-natives";
-import {
+import statify, {
 	readArchive,
 	statifyAssistantContext,
 	statifyMode,
@@ -620,4 +622,119 @@ test("default mode replaces for Jeff; shadow requires an explicit flag", () => {
 	expect(statifyMode("")).toBe("replace");
 	expect(statifyMode("shadow")).toBe("shadow");
 	expect(statifyMode(false)).toBeUndefined();
+});
+
+test("restored session totals survive startup and reset on switching to a new session", async () => {
+	const profile = await archive();
+	const previousProfile = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = profile;
+	type Pi = Parameters<typeof statify>[0];
+	type Ctx = ExtensionContext;
+	const handlers = new Map<string, (event: never, ctx: Ctx) => unknown>();
+	let command: (args: string, ctx: Ctx) => unknown = () => {};
+	const appended: unknown[] = [];
+	const pi = {
+		zod,
+		registerFlag() {},
+		getFlag() {
+			return "";
+		},
+		registerCommand(_name: string, options: { handler: typeof command }) {
+			command = options.handler;
+		},
+		registerTool() {},
+		on(name: string, handler: (event: never, ctx: Ctx) => unknown) {
+			handlers.set(name, handler);
+		},
+		appendEntry(customType: string, data: unknown) {
+			appended.push({ customType, data });
+		},
+		logger: { debug() {}, info() {}, warn() {}, error() {} },
+	} as unknown as Pi;
+	let sessionId = "resumed";
+	let entries: unknown[] = [
+		{
+			type: "custom",
+			customType: "statify-stats",
+			data: {
+				v: 1,
+				requests: 3,
+				replaced: 2,
+				kept: 1,
+				errors: 0,
+				saved: 4200,
+				used: 1200,
+			},
+		},
+		{
+			type: "custom",
+			customType: "statify-stats",
+			data: {
+				v: 1,
+				requests: 4,
+				replaced: 1,
+				kept: 2,
+				errors: 1,
+				saved: 4200,
+				used: 300,
+			},
+		},
+		{
+			type: "custom",
+			customType: "statify-stats",
+			data: {
+				v: 1,
+				requests: 99,
+				replaced: 99,
+				kept: 0,
+				errors: 0,
+				saved: "bad",
+				used: 0,
+			},
+		},
+	];
+	let status = "";
+	let notification = "";
+	const ctx = {
+		sessionManager: {
+			getSessionId: () => sessionId,
+			getEntries: () => entries,
+		},
+		ui: {
+			theme: { fg: (_color: string, text: string) => text },
+			setStatus: (_key: string, text?: string) => {
+				status = text ?? "";
+			},
+			notify: (text: string) => {
+				notification = text;
+			},
+		},
+	} as unknown as Ctx;
+	const emit = async (name: string) => {
+		const handler = handlers.get(name);
+		if (!handler) throw new Error(`Missing handler: ${name}`);
+		await handler({} as never, ctx);
+	};
+	try {
+		statify(pi);
+		await emit("session_start");
+		await command("status", ctx);
+		expect(notification).toContain(
+			"This session: 7 requests · saved 8.4k tokens · classifier used 1.5k · replaced 3, kept 3, errors 1",
+		);
+		expect(status).toContain(" · Σ −8.4k");
+		expect(status).not.toContain(" · last ");
+		sessionId = "new";
+		entries = [];
+		await emit("session_switch");
+		await command("status", ctx);
+		expect(notification).toContain(
+			"This session: 0 requests · saved 0 tokens · classifier used 0 · replaced 0, kept 0, errors 0",
+		);
+		expect(status).not.toContain("Σ");
+	} finally {
+		await emit("session_shutdown");
+		if (previousProfile === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousProfile;
+	}
 });
