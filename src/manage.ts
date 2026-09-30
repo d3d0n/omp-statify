@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { resolve } from "node:path";
+import { jeffSetupInstructions } from "./jeff-setup";
 import {
 	parseJeffUrl,
 	readJeffKey,
@@ -89,17 +89,10 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (action === "jeff" && argument === "setup") {
-		const root = resolve(import.meta.dir, "..");
-		const quoted = `'${root.replaceAll("'", "'\\''")}'`;
-		console.log(
-			`mise trust '${resolve(root, "mise.toml").replaceAll("'", "'\\''")}'`,
-		);
-		console.log(`mise -C ${quoted} install uv`);
-		console.log(`mise -C ${quoted} run jeff:setup`);
-		console.log(`mise -C ${quoted} run jeff:serve`);
+		console.log(jeffSetupInstructions());
 		return;
 	}
-	if (action === "jeff-key" && argument === "add") {
+	if (action === "jeff-key" && (argument === "add" || argument === "edit")) {
 		await saveJeffKey(await hiddenKey("Jeff"));
 		console.log(
 			"Jeff key saved; enable Statify separately with /statify on in OMP or statify on in a terminal",
@@ -111,7 +104,7 @@ async function main(): Promise<void> {
 		console.log("Jeff key removed");
 		return;
 	}
-	if (action === "key" && argument === "add") {
+	if (action === "key" && (argument === "add" || argument === "edit")) {
 		await saveKey(await hiddenKey());
 		console.log(
 			"OpenRouter key saved; enable Statify separately with /statify on in OMP or statify on in a terminal",
@@ -131,7 +124,7 @@ async function main(): Promise<void> {
 		return;
 	}
 	throw new Error(
-		"Usage: bun src/manage.ts on|off|status|provider jev|jeff|jeff-url <url>|jeff-key add|remove|jeff setup|key add|remove|statusline on|off",
+		"Usage: bun src/manage.ts on|off|status|provider jev|jeff|jeff-url <url>|jeff-key add|edit|remove|jeff setup|key add|edit|remove|statusline on|off",
 	);
 }
 

@@ -1,6 +1,6 @@
 {
 	"name": "omp-statify",
-	"version": "0.2.0-dev.2",
+	"version": "0.2.0-dev.3",
 	"description": "Jev-powered context filtering for Oh-my-pi",
 	"type": "module",
 	"bin": {
@@ -13,6 +13,8 @@
 	},
 	"files": [
 		"src/index.ts",
+		"src/key-input.ts",
+		"src/jeff-setup.ts",
 		"src/manage.ts",
 		"src/settings.ts",
 		"README.md",
@@ -29,7 +31,8 @@
 	},
 	"dependencies": {
 		"@oh-my-pi/pi-coding-agent": "18.4.2",
-		"@oh-my-pi/pi-natives": "18.4.2"
+		"@oh-my-pi/pi-natives": "18.4.2",
+		"@oh-my-pi/pi-tui": "18.4.2"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.14",

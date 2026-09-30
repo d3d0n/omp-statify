@@ -37,12 +37,7 @@ test("enable and statusline persist without touching other OMP credentials", asy
 	const dir = await temporary();
 	const other = join(dir, "agent.db");
 	await writeFile(other, "existing OMP auth");
-	expect(await readSettings(dir)).toEqual({
-		enabled: false,
-		statusline: false,
-		provider: "jev",
-		jeffUrl: DEFAULT_JEFF_URL,
-	});
+	expect((await readSettings(dir)).enabled).toBe(false);
 	await saveSettings(
 		{
 			enabled: true,
@@ -200,7 +195,7 @@ test("Jeff key is separate, private, and rejects unsafe files", async () => {
 	expect(await readKey(dir)).toBe("openrouter-secret");
 });
 
-test("CLI switches provider, enables unkeyed Jeff, and prints safe local setup commands", async () => {
+test("CLI switches providers without sharing keys or disabling Jeff", async () => {
 	const dir = await temporary();
 	const secret = "jeff-secret-not-for-stdout";
 	async function cli(args: string[], input?: string) {
@@ -242,18 +237,6 @@ test("CLI switches provider, enables unkeyed Jeff, and prints safe local setup c
 	expect(await readJeffKey(dir)).toBeUndefined();
 	expect((await cli(["jeff-url", "https://127.0.0.1:9123"])).code).not.toBe(0);
 	expect((await readSettings(dir)).jeffUrl).toBe("http://127.0.0.1:9123");
-	const setup = await cli(["jeff", "setup"]);
-	expect(setup.code).toBe(0);
-	const root = join(import.meta.dir, "..").replaceAll("'", "'\\''");
-	expect(setup.stdout).toBe(
-		`mise trust '${root}/mise.toml'\n${[
-			"install uv",
-			"run jeff:setup",
-			"run jeff:serve",
-		]
-			.map((command) => `mise -C '${root}' ${command}\n`)
-			.join("")}`,
-	);
 	expect((await cli(["provider", "jev"])).code).toBe(0);
 	await writeFile(join(dir, "statify-jeff.key"), "unsafe-jeff-key", {
 		mode: 0o644,

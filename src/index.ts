@@ -10,6 +10,8 @@ import type {
 	ToolResultEvent,
 } from "@oh-my-pi/pi-coding-agent";
 import { countTokens } from "@oh-my-pi/pi-natives";
+import { jeffSetupInstructions, setupJeff } from "./jeff-setup";
+import { promptKey } from "./key-input";
 import type { StatifySettings } from "./settings";
 import {
 	DEFAULT_JEFF_URL,
@@ -19,7 +21,10 @@ import {
 	readSettings,
 	removeJeffKey,
 	removeKey,
+	saveJeffKey,
+	saveKey,
 	saveSettings,
+	statifyDir,
 } from "./settings";
 
 const MIN_LENGTH = 4_000;
@@ -561,6 +566,28 @@ export default function statify(pi: ExtensionAPI): void {
 		healthCache.set(sessionId, { url, promise });
 		return promise;
 	};
+	const providerName = (provider: StatifySettings["provider"]) =>
+		provider === "jev" ? "Jev" : "Jeff (experimental)";
+	const state = async (
+		ctx: ExtensionContext,
+		settings: StatifySettings,
+	): Promise<string> => {
+		if (!settings.enabled) return "off";
+		const currentMode = mode();
+		if (!currentMode) return "invalid mode";
+		if (currentMode === "record") return "record";
+		if (settings.provider === "jev")
+			return (await readKey()) ? currentMode : "add key";
+		const server = await health(
+			ctx.sessionManager.getSessionId(),
+			settings.jeffUrl,
+		);
+		if (server.status !== "ready")
+			return server.status === "unreachable" ? "offline" : "loading";
+		return server.authentication && !(await readJeffKey())
+			? "add Jeff key"
+			: currentMode;
+	};
 	const refreshStatus = async (ctx: ExtensionContext): Promise<void> => {
 		try {
 			const settings = await readSettings();
@@ -568,21 +595,304 @@ export default function statify(pi: ExtensionAPI): void {
 				ctx.ui.setStatus("statify", undefined);
 				return;
 			}
-			let state = !settings.enabled ? "off" : mode();
-			if (settings.enabled && settings.provider === "jev") {
-				if (!(await readKey())) state = "no key";
-			} else if (settings.enabled && settings.provider === "jeff") {
+			const current = await state(ctx, settings);
+			const idle = current === "off" || current === "record";
+			const active = current === "replace" || current === "shadow";
+			const color = idle ? "dim" : active ? "success" : "warning";
+			const name = settings.provider === "jev" ? "Jev" : "Jeff (exp)";
+			ctx.ui.setStatus(
+				"statify",
+				`${ctx.ui.theme.fg(color, idle ? "○" : active ? "●" : "!")} ${ctx.ui.theme.fg("dim", "Statify")} · ${ctx.ui.theme.fg("accent", name)} · ${ctx.ui.theme.fg(color, current)}`,
+			);
+		} catch {
+			ctx.ui.setStatus(
+				"statify",
+				ctx.ui.theme.fg("error", "! Statify · configuration error · /statify"),
+			);
+		}
+	};
+	const editKey = async (
+		provider: StatifySettings["provider"],
+		ctx: ExtensionContext,
+	): Promise<boolean> => {
+		if (ctx.mode !== "tui") {
+			const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+			ctx.ui.notify(
+				`Run in an interactive terminal:\nPI_CODING_AGENT_DIR=${quote(statifyDir())} bun ${quote(join(import.meta.dir, "manage.ts"))} ${provider === "jev" ? "key" : "jeff-key"} add\nNever paste a key into chat.`,
+				"info",
+			);
+			return false;
+		}
+		const key = await promptKey(
+			ctx,
+			provider === "jev" ? "Jev · OpenRouter API key" : "Jeff · API key",
+		);
+		if (!key?.trim()) return false;
+		await (provider === "jev" ? saveKey : saveJeffKey)(key);
+		ctx.ui.notify(
+			`${providerName(provider)} key saved to this profile. Filtering is unchanged.`,
+			"info",
+		);
+		return true;
+	};
+	const removeStoredKey = async (
+		provider: StatifySettings["provider"],
+	): Promise<void> => {
+		await (provider === "jev" ? removeKey : removeJeffKey)();
+		const settings = await readSettings();
+		if (provider === "jev" && settings.provider === "jev")
+			await saveSettings({ ...settings, enabled: false });
+	};
+	const enableProvider = async (
+		provider: StatifySettings["provider"],
+		ctx: ExtensionContext,
+	): Promise<void> => {
+		const currentMode = mode();
+		if (!currentMode)
+			throw new Error(
+				"Invalid --statify-mode; use replace, shadow, or record.",
+			);
+		if (currentMode !== "record") {
+			if (provider === "jev") {
+				if (!(await readKey()) && !(await editKey(provider, ctx))) return;
+			} else {
+				const settings = await readSettings();
+				healthCache.delete(ctx.sessionManager.getSessionId());
 				const server = await health(
 					ctx.sessionManager.getSessionId(),
 					settings.jeffUrl,
 				);
-				if (server.status !== "ready") state = server.status;
-				else if (server.authentication && !(await readJeffKey()))
-					state = "no Jeff key";
+				if (server.status !== "ready") {
+					ctx.ui.notify(
+						`Jeff is ${server.status}. Use Install / setup Jeff to start the server in a separate terminal, then Check connection.`,
+						"warning",
+					);
+					return;
+				}
+				if (
+					server.authentication &&
+					!(await readJeffKey()) &&
+					!(await editKey(provider, ctx))
+				)
+					return;
 			}
-			ctx.ui.setStatus("statify", `Statify ${settings.provider} ${state}`);
-		} catch {
-			ctx.ui.setStatus("statify", undefined);
+		}
+		const message =
+			currentMode === "record"
+				? "Record mode makes no provider calls and does not change context."
+				: provider === "jev"
+					? `Jev sends eligible tool output, earlier assistant text, and task context to OpenRouter. Enable only for data you may send there.\nMode: ${currentMode}. Replacement can omit needed context; exact originals are archived locally.`
+					: `Jeff processes context locally. It is experimental: Jeff 0.8B omitted required code and caused a wrong main-model answer in a paired check.\nMode: ${currentMode}. Recovery does not make omissions harmless.`;
+		if (!(await ctx.ui.confirm(`Enable ${providerName(provider)}?`, message)))
+			return;
+		await saveSettings({
+			...(await readSettings()),
+			provider,
+			enabled: true,
+		});
+	};
+	type MenuAction = {
+		label: string;
+		description: string;
+		run?: () => Promise<unknown>;
+	};
+	const selectAction = async (
+		ctx: ExtensionContext,
+		title: string,
+		items: MenuAction[],
+	): Promise<boolean> => {
+		const selection = await ctx.ui.select(title, items);
+		const item = items.find((item) => item.label === selection);
+		if (!item?.run) return false;
+		await item.run();
+		healthCache.delete(ctx.sessionManager.getSessionId());
+		await refreshStatus(ctx);
+		return true;
+	};
+	const keyActions = (
+		provider: StatifySettings["provider"],
+		keySet: boolean,
+		ctx: ExtensionContext,
+	): MenuAction[] => {
+		const actions: MenuAction[] = [
+			{
+				label: keySet ? "Edit API key" : "Add API key",
+				description: "Masked input · saved only in this OMP profile",
+				run: () => editKey(provider, ctx),
+			},
+		];
+		if (keySet)
+			actions.push({
+				label: "Remove API key",
+				description:
+					provider === "jev"
+						? "Remove this profile's key; disables Jev if selected"
+						: "Remove this profile's optional local-server key",
+				run: async () => {
+					if (
+						await ctx.ui.confirm(
+							"Remove API key?",
+							"This removes the local key, not the provider/server token. Rotate it at the provider if exposed.",
+						)
+					)
+						await removeStoredKey(provider);
+				},
+			});
+		return actions;
+	};
+	const toggleAction = (
+		provider: StatifySettings["provider"],
+		settings: StatifySettings,
+		ctx: ExtensionContext,
+	): MenuAction => {
+		if (settings.enabled && settings.provider === provider)
+			return {
+				label: `Disable ${providerName(provider)}`,
+				description: "Stop subsequent classification; keep setup and key",
+				run: () => saveSettings({ ...settings, enabled: false }),
+			};
+		return {
+			label: `Enable ${providerName(provider)}`,
+			description: "Check setup and ask for consent before enabling",
+			run: () => enableProvider(provider, ctx),
+		};
+	};
+	const connectionMenu = async (ctx: ExtensionContext): Promise<void> => {
+		for (;;) {
+			const settings = await readSettings();
+			const keySet = Boolean(await readJeffKey());
+			if (
+				!(await selectAction(ctx, "Jeff connection settings", [
+					{
+						label: "Edit endpoint",
+						description: settings.jeffUrl,
+						run: async () => {
+							const url = await ctx.ui.input("Jeff endpoint", settings.jeffUrl);
+							if (url?.trim())
+								await saveSettings({
+									...(await readSettings()),
+									jeffUrl: parseJeffUrl(url.trim()),
+								});
+						},
+					},
+					...keyActions("jeff", keySet, ctx),
+					{ label: "Back", description: "Return to Jeff setup" },
+				]))
+			)
+				return;
+		}
+	};
+	const providerMenu = async (
+		provider: StatifySettings["provider"],
+		ctx: ExtensionContext,
+	): Promise<void> => {
+		for (;;) {
+			const settings = await readSettings();
+			const keySet = Boolean(
+				await (provider === "jev" ? readKey : readJeffKey)(),
+			);
+			const server =
+				provider === "jeff"
+					? await health(ctx.sessionManager.getSessionId(), settings.jeffUrl)
+					: undefined;
+			const title =
+				provider === "jev"
+					? `Jev · OpenRouter · key ${keySet ? "saved" : "needed"}`
+					: `Jeff (experimental) · ${server?.status}${server?.authentication && !keySet ? " · key needed" : ""}`;
+			const items: MenuAction[] =
+				provider === "jev"
+					? [
+							...keyActions("jev", keySet, ctx),
+							toggleAction(provider, settings, ctx),
+							{
+								label: "Get an OpenRouter key",
+								description:
+									"Jev runs in the cloud; no local model installation",
+								run: async () =>
+									ctx.ui.notify(
+										"Create a separate API key at https://openrouter.ai/settings/keys, then choose Add API key. OMP's own login is independent. Never paste keys into chat.",
+										"info",
+									),
+							},
+						]
+					: [
+							{
+								label: "Install / setup Jeff",
+								description:
+									"Apple Silicon · pinned local model · separate server terminal",
+								run: () => setupJeff(pi, ctx),
+							},
+							{
+								label: "Check connection",
+								description: `${settings.jeffUrl} · no task/context is sent`,
+								run: async () => {
+									healthCache.delete(ctx.sessionManager.getSessionId());
+									const server = await health(
+										ctx.sessionManager.getSessionId(),
+										settings.jeffUrl,
+									);
+									ctx.ui.notify(
+										`Jeff ${server.status} at ${settings.jeffUrl}${server.authentication ? " · API key required" : " · no API key required"}`,
+										server.status === "ready" ? "info" : "warning",
+									);
+								},
+							},
+							toggleAction(provider, settings, ctx),
+							{
+								label: "Connection settings",
+								description: "Loopback endpoint and optional Jeff API key",
+								run: () => connectionMenu(ctx),
+							},
+						];
+			items.push({ label: "Back", description: "Return to Statify" });
+			if (!(await selectAction(ctx, title, items))) return;
+		}
+	};
+	const menu = async (ctx: ExtensionContext): Promise<void> => {
+		for (;;) {
+			const settings = await readSettings();
+			const current = await state(ctx, settings);
+			if (
+				!(await selectAction(
+					ctx,
+					`Statify · ${providerName(settings.provider)} · ${current}`,
+					[
+						{
+							label: "Jev · cloud",
+							description: "OpenRouter key and setup",
+							run: () => providerMenu("jev", ctx),
+						},
+						{
+							label: "Jeff · local (experimental)",
+							description: "Install, connect, and enable a local server",
+							run: () => providerMenu("jeff", ctx),
+						},
+						{
+							label: settings.enabled ? "Disable Statify" : "Enable Statify",
+							description: settings.enabled
+								? "Stop subsequent classification; keep configuration"
+								: `Enable ${providerName(settings.provider)} after setup and consent`,
+							run: () =>
+								settings.enabled
+									? saveSettings({ ...settings, enabled: false })
+									: enableProvider(settings.provider, ctx),
+						},
+						{
+							label: settings.statusline
+								? "Hide statusline"
+								: "Show statusline",
+							description:
+								"Provider, mode, and actionable readiness at a glance",
+							run: () =>
+								saveSettings({
+									...settings,
+									statusline: !settings.statusline,
+								}),
+						},
+					],
+				))
+			)
+				return;
 		}
 	};
 	const command = async (
@@ -590,39 +900,22 @@ export default function statify(pi: ExtensionAPI): void {
 		ctx: ExtensionContext,
 	): Promise<void> => {
 		const action = input.trim().toLowerCase();
-		if (!action || action === "menu") {
-			if (!ctx.hasUI) {
-				ctx.ui.notify(
-					"Use statify on|off|status|provider jev|jeff|jeff setup|jeff-url URL|jeff-key add|remove in a terminal",
-					"info",
-				);
+		try {
+			healthCache.delete(ctx.sessionManager.getSessionId());
+			if (!action || action === "menu") {
+				if (ctx.mode === "tui") await menu(ctx);
+				else
+					ctx.ui.notify(
+						"Open /statify in interactive OMP for guided setup. Commands: /statify on|off|status|key add|edit|remove|jeff setup|provider jev|jeff|statusline on|off.",
+						"info",
+					);
 				return;
 			}
-			const selection = await ctx.ui.select("Statify", [
-				"status",
-				"on",
-				"off",
-				"provider jev",
-				"provider jeff",
-				"jeff setup",
-				"jeff-key add",
-				"jeff-key remove",
-				"statusline on",
-				"statusline off",
-				"key add",
-				"key remove",
-			]);
-			if (selection) await command(selection, ctx);
-			return;
-		}
-		try {
 			if (action === "jeff setup") {
-				const root = `'${join(import.meta.dir, "..").replaceAll("'", "'\\''")}'`;
-				const config = `'${join(import.meta.dir, "..", "mise.toml").replaceAll("'", "'\\''")}'`;
-				ctx.ui.notify(
-					`Run in a terminal:\nmise trust ${config}\nmise -C ${root} install uv\nmise -C ${root} run jeff:setup\nmise -C ${root} run jeff:serve`,
-					"info",
-				);
+				if (ctx.mode === "tui") await setupJeff(pi, ctx);
+				else {
+					ctx.ui.notify(jeffSetupInstructions(), "info");
+				}
 				return;
 			}
 			const settings = await readSettings();
@@ -643,19 +936,18 @@ export default function statify(pi: ExtensionAPI): void {
 					...settings,
 					jeffUrl: parseJeffUrl(input.trim().slice("jeff-url ".length)),
 				});
-			else if (action === "key remove") {
-				await removeKey();
-				if (settings.provider === "jev")
-					await saveSettings({ ...settings, enabled: false });
-			} else if (action === "jeff-key remove") {
-				await removeJeffKey();
-			} else if (action === "key add" || action === "jeff-key add") {
-				const manager = `'${join(import.meta.dir, "manage.ts").replaceAll("'", "'\\''")}'`;
-				ctx.ui.notify(`Run in a terminal: bun ${manager} ${action}`, "info");
-				return;
+			else if (action === "key remove" || action === "jeff-key remove")
+				await removeStoredKey(action === "key remove" ? "jev" : "jeff");
+			else if (
+				action === "key add" ||
+				action === "key edit" ||
+				action === "jeff-key add" ||
+				action === "jeff-key edit"
+			) {
+				await editKey(action.startsWith("jeff-key") ? "jeff" : "jev", ctx);
 			} else if (action !== "status") {
 				ctx.ui.notify(
-					"Use /statify on|off|status|provider jev|provider jeff|jeff setup|jeff-url URL|jeff-key add|jeff-key remove|key add|key remove|statusline on|off",
+					"Open /statify for setup and controls, or /statify status for details.",
 					"warning",
 				);
 				return;
@@ -664,17 +956,18 @@ export default function statify(pi: ExtensionAPI): void {
 			await refreshStatus(ctx);
 			if (action === "status") {
 				const current = await readSettings();
-				const key =
-					current.provider === "jev" ? await readKey() : await readJeffKey();
+				const keySet = Boolean(
+					await (current.provider === "jev" ? readKey : readJeffKey)(),
+				);
 				const server =
 					current.provider === "jeff"
 						? await health(ctx.sessionManager.getSessionId(), current.jeffUrl)
 						: undefined;
 				ctx.ui.notify(
-					`Statify ${current.enabled ? "on" : "off"} · provider ${current.provider} · key ${key ? "set" : "missing"} · mode ${mode() ?? "invalid"} · statusline ${current.statusline ? "on" : "off"}${server ? ` · Jeff ${server.status}${server.authentication && !key ? " (key required)" : ""} at ${current.jeffUrl}` : ""}`,
+					`Statify · ${providerName(current.provider)} · ${await state(ctx, current)}\nKey: ${keySet ? "saved" : current.provider === "jev" ? "needed" : "not set (optional unless server requires auth)"} · mode: ${mode() ?? "invalid"} · statusline: ${current.statusline ? "visible" : "hidden"}${server ? `\nEndpoint: ${current.jeffUrl} · server: ${server.status}${server.authentication ? " · key required" : ""}` : ""}`,
 					"info",
 				);
-			} else ctx.ui.notify(`Statify: ${action}`, "info");
+			}
 		} catch (error) {
 			ctx.ui.notify(
 				error instanceof Error ? error.message : "Statify settings failed",

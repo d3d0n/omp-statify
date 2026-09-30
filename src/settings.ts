@@ -21,7 +21,7 @@ export type StatifySettings = {
 export const DEFAULT_JEFF_URL = "http://127.0.0.1:8765";
 const defaults: StatifySettings = {
 	enabled: false,
-	statusline: false,
+	statusline: true,
 	provider: "jev",
 	jeffUrl: DEFAULT_JEFF_URL,
 };
