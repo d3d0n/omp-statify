@@ -682,7 +682,7 @@ export default function statify(pi: ExtensionAPI): void {
 				? "Record mode makes no provider calls and does not change context."
 				: provider === "jev"
 					? `Jev sends eligible tool output, earlier assistant text, and task context to OpenRouter. Enable only for data you may send there.\nMode: ${currentMode}. Replacement can omit needed context; exact originals are archived locally.`
-					: `Jeff processes context locally. It is experimental: Jeff 0.8B omitted required code and caused a wrong main-model answer in a paired check.\nMode: ${currentMode}. Recovery does not make omissions harmless.`;
+					: `Jeff processes context locally.\nMode: ${currentMode}. Recovery does not make omissions harmless.`;
 		if (!(await ctx.ui.confirm(`Enable ${providerName(provider)}?`, message)))
 			return;
 		await saveSettings({
@@ -705,7 +705,6 @@ export default function statify(pi: ExtensionAPI): void {
 		const item = items.find((item) => item.label === selection);
 		if (!item?.run) return false;
 		await item.run();
-		healthCache.delete(ctx.sessionManager.getSessionId());
 		await refreshStatus(ctx);
 		return true;
 	};
@@ -786,6 +785,7 @@ export default function statify(pi: ExtensionAPI): void {
 		provider: StatifySettings["provider"],
 		ctx: ExtensionContext,
 	): Promise<void> => {
+		let connectionResult: JeffHealth | undefined;
 		for (;;) {
 			const settings = await readSettings();
 			const keySet = Boolean(
@@ -798,7 +798,7 @@ export default function statify(pi: ExtensionAPI): void {
 			const title =
 				provider === "jev"
 					? `Jev · OpenRouter · key ${keySet ? "saved" : "needed"}`
-					: `Jeff (experimental) · ${server?.status}${server?.authentication && !keySet ? " · key needed" : ""}`;
+					: `Jeff (experimental) · ${server?.status}${server?.authentication && !keySet ? " · key needed" : ""}${connectionResult ? ` · connection ${connectionResult.status}${connectionResult.authentication ? " · API key required" : ""}` : ""}`;
 			const items: MenuAction[] =
 				provider === "jev"
 					? [
@@ -824,16 +824,14 @@ export default function statify(pi: ExtensionAPI): void {
 							},
 							{
 								label: "Check connection",
-								description: `${settings.jeffUrl} · no task/context is sent`,
+								description: connectionResult
+									? `Last check: ${connectionResult.status} · select to check again`
+									: `${settings.jeffUrl} · no task/context is sent`,
 								run: async () => {
 									healthCache.delete(ctx.sessionManager.getSessionId());
-									const server = await health(
+									connectionResult = await health(
 										ctx.sessionManager.getSessionId(),
 										settings.jeffUrl,
-									);
-									ctx.ui.notify(
-										`Jeff ${server.status} at ${settings.jeffUrl}${server.authentication ? " · API key required" : " · no API key required"}`,
-										server.status === "ready" ? "info" : "warning",
 									);
 								},
 							},

@@ -13,7 +13,7 @@ OMP discovers the package's `src/index.ts` automatically from its plugin manifes
 
 Open `/statify` in OMP. The menu has four actions: **Jev · cloud**, **Jeff · local (experimental)**, **Enable/Disable Statify**, and **Show/Hide statusline**. Provider menus contain their setup and key controls. Escape goes back; Escape from the main menu closes it.
 
-Filtering starts **off**. The statusline is visible by default for new profiles; an existing visibility choice is preserved. It shows the provider, active mode, and problems such as a missing key, a loading server, or an offline server. It updates on session/turn start and after controls are used; use Jeff's **Check connection** to refresh readiness while idle. A saved key is not proof that the provider accepts it.
+Filtering starts **off**. The statusline is visible by default for new profiles; an existing visibility choice is preserved. It shows the provider, active mode, and problems such as a missing key, a loading server, or an offline server. It updates on session/turn start and after controls are used; use Jeff's **Check connection** to refresh readiness while idle—the result stays visible in the Jeff menu title and menu item. A saved key is not proof that the provider accepts it.
 
 ## Jev: add an OpenRouter key and enable
 
@@ -43,7 +43,7 @@ omp --statify-mode=record
 2. Choose **Install / update pinned Jeff**. Installation currently supports Apple Silicon macOS. If mise is missing, install it with `brew install mise` and retry; do **not** install uv or Python through Homebrew.
 3. Inspect the absolute installed-plugin `mise.toml` named in the trust prompt. Approving explicitly trusts that file and runs its pinned installation tasks: mise installs uv, and uv installs Python, Jeff's locked dependencies, and the model. Canceling does not trust or install anything. A failed command stops installation and reports the failure; it never launches the server or enables filtering.
 4. Run the displayed `jeff:serve` command in a **separate, persistent terminal** and keep it open. Statify never starts the server automatically.
-5. Back in Jeff's menu, choose **Check connection**. Once the server is ready, choose **Enable Jeff (experimental)** and confirm the warning. No OpenRouter key is needed.
+5. Back in Jeff's menu, choose **Check connection**. Once the server is ready, choose **Enable Jeff (experimental)** and confirm. No OpenRouter key is needed.
 
 The installer uses the packaged `mise.toml` rather than requiring a Statify checkout or global Jeff/Python installation. It pins uv 0.12.19, Python 3.14, Jeff's server revision and the 0.8B model revision. The Jeff checkout lives under `${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}`; if overriding `JEFF_DIR`, keep the same environment for installation and serving.
 
@@ -51,7 +51,7 @@ The installer uses the packaged `mise.toml` rather than requiring a Statify chec
 
 `/statify jeff setup` opens the installer in interactive OMP. The standalone `statify jeff setup` and headless/RPC command instead print absolute manual trust/install/serve instructions. `/statify jeff-key add|edit` opens masked entry in interactive OMP and gives a profile-scoped terminal fallback otherwise. `/statify provider jeff`, `/statify on`, and `/statify jeff-url <url>` remain direct command alternatives.
 
-**Jeff is experimental:** in a [paired code test](benchmarks.md#paired-jev--local-jeff-08b-relevance-and-latency), Jeff 0.8B hid a required line and the main assistant gave an incorrect answer. Both providers use `replace` after explicit enablement unless a launch flag selects another mode. Archive recovery does not make omissions harmless. See [local inference](local-inference.md) for manual serving and cleanup and [Jeff research](jeff.md) for quality limits.
+Jeff is experimental. See the [paired code test](benchmarks.md#paired-jev--local-jeff-08b-relevance-and-latency) and [Jeff research](jeff.md) for evaluation results and limitations. Both providers use `replace` after explicit enablement unless a launch flag selects another mode. See [local inference](local-inference.md) for manual serving and cleanup.
 
 ## Manage or remove access
 

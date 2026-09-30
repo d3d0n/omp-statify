@@ -9,8 +9,6 @@ Statify is **off until you enable it**. Choose how to process output:
 - **Jev (cloud):** uses OpenRouter and needs a separate API key. Only enable it for data you are allowed to send there.
 - **Jeff (local, experimental):** runs on your Apple Silicon Mac without an OpenRouter key.
 
-> **Jeff can miss important code.** In a test, it hid a needed line and the assistant gave the wrong answer. [Test details](docs/benchmarks.md#paired-jev--local-jeff-08b-relevance-and-latency).
-
 ## Quick start
 
 Requires [OMP](https://github.com/can1357/oh-my-pi#install) and Bun:

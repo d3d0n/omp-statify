@@ -4,8 +4,6 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const config = resolve(root, "mise.toml");
-const warning =
-	"Jeff is experimental and requires Apple Silicon macOS. In measured testing, Jeff 0.8B omitted required code and caused a wrong main-model answer.";
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 const serveCommand = `mise -C ${quote(root)} run jeff:serve`;
 const startInstructions =
@@ -14,7 +12,6 @@ const startInstructions =
 
 export function jeffSetupInstructions(): string {
 	return [
-		warning,
 		"Requires mise (if missing: brew install mise). Python and uv are managed by the pinned plugin tasks, not Homebrew.",
 		`Review ${config} before trusting it: trust permits this plugin's tasks to run and download dependencies/model. Run the following only if you approve:`,
 		`mise trust ${quote(config)}`,
@@ -50,7 +47,6 @@ export async function setupJeff(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 ): Promise<void> {
-	ctx.ui.notify(warning, "warning");
 	const action = await ctx.ui.select("Jeff setup (experimental)", [
 		{
 			label: "Install / update pinned Jeff",
@@ -96,7 +92,7 @@ export async function setupJeff(
 	}
 	const approved = await ctx.ui.confirm(
 		"Trust plugin and install Jeff?",
-		`Absolute installed plugin configuration:\n${config}\n\nApproving runs mise trust on this file, trusts/runs its plugin tasks, and downloads pinned uv, Python dependencies, the Jeff server and model. Review the file first.\n\n${warning}\n\nThe server will NOT be launched automatically. Filtering and selected provider will NOT change.`,
+		`Absolute installed plugin configuration:\n${config}\n\nApproving runs mise trust on this file, trusts/runs its plugin tasks, and downloads pinned uv, Python dependencies, the Jeff server and model. Review the file first.\n\nThe server will NOT be launched automatically. Filtering and selected provider will NOT change.`,
 	);
 	if (!approved) return;
 	const commands = [
@@ -132,7 +128,7 @@ export async function setupJeff(
 		}
 	}
 	ctx.ui.notify(
-		`Pinned Jeff installation completed.\n\n${warning}\n\n${startInstructions}`,
+		`Pinned Jeff installation completed.\n\n${startInstructions}`,
 		"info",
 	);
 }
