@@ -39,7 +39,7 @@ const decision =
 test("baseline and shadow preserve visible evidence; replace can omit it and recover exact archive span", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "bench-test-"));
 	try {
-		const fetcher = decision([0.01, 0.01, 0.01, 0.01], {
+		const fetcher = decision([0.99, 0.01, 0.99], {
 			input_tokens: 145,
 			output_tokens: 25,
 			cost: 0.0003,
@@ -75,10 +75,10 @@ test("baseline and shadow preserve visible evidence; replace can omit it and rec
 		});
 		expect(replace.run.jevScores).toMatchObject({
 			min: 0.01,
-			max: 0.01,
+			max: 0.99,
 			uncertainChunks: 0,
-			lowChunks: 3,
-			highChunks: 0,
+			lowChunks: 1,
+			highChunks: 2,
 			invalidChunks: 0,
 		});
 	} finally {

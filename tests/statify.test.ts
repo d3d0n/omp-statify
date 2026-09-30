@@ -259,7 +259,7 @@ test("a numbered Python declaration stays with its decorator, docstring, and bod
 	expect(inspected).toBe(true);
 });
 
-test("all-low chunks still have a receipt; shadow and non-shrinking results leave no archive", async () => {
+test("all-low chunks: Jeff omits them behind a receipt, Jev keeps the output; shadow and non-shrinking results leave no archive", async () => {
 	const dir = await archive();
 	const text = "not task data\n".repeat(300);
 	const base = {
@@ -272,11 +272,35 @@ test("all-low chunks still have a receipt; shadow and non-shrinking results leav
 	};
 	const none = await statifyResult(tool(text), {
 		...base,
-		fetcher: decisions([0.02, 0.02, 0.02]),
+		provider: "jeff",
+		chunkTokens: split(text, 3, Encoding.Qwen3),
+		fetcher: async (_url, init) => {
+			const { questions } = JSON.parse(String(init.body));
+			return new Response(
+				JSON.stringify({
+					answers: Object.fromEntries(
+						Object.keys(questions).map((id) => [
+							id,
+							{ type: "noul", noul: 0.02 },
+						]),
+					),
+				}),
+			);
+		},
 	});
 	expect(none?.content[0].text).toContain(
 		`\n[statify omitted chars 1-${text.length}]\n`,
 	);
+	// Jev only omits chunks clearly weaker than the best one, never all of them.
+	const jev = join(dir, "jev");
+	expect(
+		await statifyResult(tool(text), {
+			...base,
+			archive: jev,
+			fetcher: decisions([0.02, 0.02, 0.02]),
+		}),
+	).toBeUndefined();
+	expect(await readdir(jev)).toEqual([]);
 	const shadow = join(dir, "shadow");
 	expect(
 		await statifyResult(tool(text), {
@@ -298,6 +322,33 @@ test("all-low chunks still have a receipt; shadow and non-shrinking results leav
 		}),
 	).toBeUndefined();
 	expect(await readdir(noOp)).toEqual([]);
+});
+
+test("Jev omits a chunk only when it scores at most 0.3 and below half of the best chunk", async () => {
+	const dir = await archive();
+	const text = ["alpha", "bravo", "delta"]
+		.map((word) => `${word}-line\n`.repeat(200))
+		.join("");
+	const shown = async (scores: number[]) => {
+		const result = await statifyResult(tool(text), {
+			archive: dir,
+			task: "Find repair order",
+			key: "test-key",
+			consent: true,
+			mode: "replace",
+			chunkTokens: split(text, 3),
+			fetcher: decisions(scores),
+		});
+		const display = result?.content[0].text ?? text;
+		return ["alpha", "bravo", "delta"].filter((word) =>
+			display.includes(`${word}-line`),
+		);
+	};
+	// 0.31 stays despite being far below the best chunk; 0.3 goes.
+	expect(await shown([0.99, 0.31, 0.3])).toEqual(["alpha", "bravo"]);
+	// With a weak best chunk, half of it is the bar: 0.2 stays, 0.19 goes.
+	expect(await shown([0.4, 0.2, 0.19])).toEqual(["alpha", "bravo"]);
+	expect(await shown([0.1, 0.1, 0.1])).toEqual(["alpha", "bravo", "delta"]);
 });
 
 test("a shorter receipt that costs more model tokens leaves the original output unchanged", async () => {

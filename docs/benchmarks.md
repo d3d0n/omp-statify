@@ -84,3 +84,18 @@ On 2026-09-30, the same inputs went through `statifyResult` in `replace` with Je
 | 2,000 | 8.8% | 20/20 | 4.6% | 8/8 | 395k | $0.0164 |
 
 Every request finished in under a second. Smaller chunks save more on both corpora, but on the real sessions they omitted most of the text the agent went on to need; RepoQA's specific tasks never lost the gold line. Statify uses **1,000**, the smallest size that kept 7 of 8 needed ranges. Limits: 8 weak labels from one session, one provider, the unchanged `≤0.15` rule; Jeff was not measured because its server was stopped during the sweep.
+
+## Drop rule: Jev
+
+With 1,000-token chunks and the inputs above (77 outputs, 406 chunks), Jev scored every chunk once per pass and each rule was replayed offline through `statifyResult`. Jev's scores vary slightly between calls, so each row averages three passes; the needed and gold counts were identical in every pass.
+
+| Omit a chunk when… | Sessions saved | Needed ranges kept | RepoQA saved | RepoQA gold kept |
+| --- | ---: | ---: | ---: | ---: |
+| score ≤ 0.15 (previous rule) | 7.0% | 7/8 | 20.9% | 20/20 |
+| score ≤ 0.25 | 42.6% | 6/8 | 32.7% | 20/20 |
+| score ≤ 0.3 | 54.2% | 6/8 | 35.1% | 20/20 |
+| **score ≤ 0.3 and below half of the output's best** | **11.1%** | **7/8** | **35.1%** | **20/20** |
+| score ≤ 0.25, and a second Jev call with the whole output in `state` also scores it ≤ 0.3 | 9.8% | 7/8 | 32.7% | 20/20 |
+| whole output in `state`, questions referring to its parts; score ≤ 0.25 | 10.6% | 7/8 | 20.2% | 20/20 |
+
+On broad session tasks Jev scores most chunks 0.15–0.3, so a higher flat cutoff saves much more but omits text the agent needed. Comparing each chunk with the output's best one keeps the same recall as the previous rule and saves 1.6× more on the sessions and 1.7× more on RepoQA; without the 0.3 cap, the relative rule lost 2 of 20 gold lines in one of five passes. A second verifying call and the whole output in `state` did not beat the single call; neither did adding the tool call's intent and arguments or conversation history to `state`, which ranked needed chunks above unneeded ones no better (86–89% of pairs versus 88%) and only raised every score. Jev counts `state` once per request: history added 12.5% classifier tokens. Jeff keeps `score ≤ 0.15` because its scores sit lower and were not measured here.

@@ -459,7 +459,15 @@ export async function statifyResult(
 			report("api_error");
 			return;
 		}
-		const selected = spans.filter((_, i) => (scores[i] ?? NaN) > 0.15);
+		// Jev omits only weak chunks well below the output's best one, so it never omits
+		// everything (docs/benchmarks.md). Jeff keeps the flat cutoff until it is measured.
+		const best = Math.max(...scores);
+		const selected = spans.filter((_, i) => {
+			const score = scores[i] ?? Number.NaN;
+			return provider === "jev"
+				? score > 0.3 || score >= best / 2
+				: score > 0.15;
+		});
 		options.record?.({
 			characters: text.length,
 			scores,
