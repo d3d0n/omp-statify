@@ -121,6 +121,7 @@ export async function prepareRun(
 	archive: string,
 	fetcher: JevFetcher,
 	key: string,
+	chunkTokens?: number,
 ): Promise<{ run: Run; display: string }> {
 	let observation: StatifyObservation | undefined;
 	const event = {
@@ -139,6 +140,7 @@ export async function prepareRun(
 					consent: true,
 					key,
 					fetcher,
+					chunkTokens,
 					observe: (value) => {
 						observation = value;
 					},

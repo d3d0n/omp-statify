@@ -80,6 +80,8 @@ const KEYWORDS: Record<string, true> = {
 	raise: true,
 	with: true,
 };
+// The documented corpus keeps its original selection: outputs Statify could
+// classify before chunk counts became dynamic (≤12 chunks of ≤1,800 characters).
 const MIN = 4_000;
 const MAX = 21_600;
 function chunkCount(text: string): number {

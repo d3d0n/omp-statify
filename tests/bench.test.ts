@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import type { BenchmarkCase } from "../bench/cases";
 import {
 	benchmark,
@@ -21,6 +22,8 @@ const item: BenchmarkCase = {
 	goldText: "function repair(): number { return 42; }",
 	toolOutput: `${"irrelevant log line\n".repeat(120)}function repair(): number { return 42; }\n${"irrelevant log line\n".repeat(130)}`,
 };
+// Three chunks regardless of the tuned default chunk size.
+const chunkTokens = Math.ceil(countTokens(item.toolOutput, Encoding.Jev) / 3);
 const decision =
 	(scores: number[], usage?: object) =>
 	async (_url: string, _init: RequestInit) =>
@@ -42,8 +45,22 @@ test("baseline and shadow preserve visible evidence; replace can omit it and rec
 			cost: 0.0003,
 		});
 		const base = await prepareRun(item, "baseline", dir, fetcher, "key");
-		const shadow = await prepareRun(item, "shadow", dir, fetcher, "key");
-		const replace = await prepareRun(item, "replace", dir, fetcher, "key");
+		const shadow = await prepareRun(
+			item,
+			"shadow",
+			dir,
+			fetcher,
+			"key",
+			chunkTokens,
+		);
+		const replace = await prepareRun(
+			item,
+			"replace",
+			dir,
+			fetcher,
+			"key",
+			chunkTokens,
+		);
 		expect(base.run.evidence).toBe("visible");
 		expect(shadow.run.evidence).toBe("visible");
 		expect(shadow.run.status).toBe("shadow");
@@ -79,6 +96,7 @@ test("missing gold is not credited; bypass and HTTP failure never count as a suc
 			dir,
 			decision([0.01, 0.01, 0.01, 0.01]),
 			"key",
+			chunkTokens,
 		);
 		expect(missing.run.evidence).toBe("missing_gold");
 		const bypass = await prepareRun(
@@ -110,6 +128,7 @@ test("missing gold is not credited; bypass and HTTP failure never count as a suc
 			dir,
 			decision([0.01, 0.5, 0.99, 0.01]),
 			"key",
+			chunkTokens,
 		);
 		expect(uncertain.run.status).toBe("replaced");
 		expect(uncertain.run.evidence).toBe("visible");

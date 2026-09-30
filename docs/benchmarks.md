@@ -70,3 +70,17 @@ The missing Jeff signature was [`processExecution` in public `fzf/src/terminal.g
 For the `fzf` miss, a single controlled GPT-6-Sol replay placed the same captured read output in a **user prompt with model tools disabled**. Baseline and Jev `replace` answered `processExecution` correctly; Jeff `replace` answered **`isExecuteAction`**, an incorrect function from the same file. Jeff's shorter context cost the main model **$0.011616** versus **$0.011446** baseline because its wrong response used 569 output tokens versus 17; Jev `replace` cost **$0.008616392** including the Jev call. This is one model replay, **not** a live agent code-repair trial or proof of general accuracy. The model could not invoke `xd://statify_read` in this replay; a real agent might recover missing text if it notices the omission.
 
 **Decision boundary:** These observations demonstrate at least one consequential false omission for Jeff 0.8B at the Jev-oriented `≤0.15` cutoff and slower warmed local decisions in this sample. They do **not** establish a false-omission rate, validate another threshold/model, measure local energy/memory cost, or prove downstream quality across coding tasks. Jeff `replace` remains experimental: selecting Jeff and enabling Statify explicitly accepts that risk. Explicit `--statify-mode=shadow` remains available for future diagnostics, but it is **not** Jeff's default.
+
+## Chunk size: Jev sweep
+
+On 2026-09-30, the same inputs went through `statifyResult` in `replace` with Jev (`typesafe/jev-1.13` over OpenRouter) at five chunk sizes, counted in Jev tokens. Inputs were the 20 RepoQA cases above (gold signature line known) and every text tool result that Statify classifies from two real OMP sessions on this repository: 53 results of 4,000–50k characters, with the tasks users actually wrote, mostly broad ones. In the second session the agent later recovered 8 omitted ranges through `xd://statify_read`; they serve as weak "needed" labels. Threshold, question wording and task were unchanged; the client timeout was lifted to time every request. Saved tokens are local `o200k_base` estimates after the receipt.
+
+| Chunk size (Jev tokens) | RepoQA saved | RepoQA gold kept | Sessions saved | Needed ranges kept | Classifier tokens | Jev cost |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 125 | 43.8% | 20/20 | 17.9% | 0/8 | 638k | $0.0245 |
+| 250 | 37.3% | 20/20 | 13.3% | 2/8 | 509k | $0.0202 |
+| 500 | 32.1% | 20/20 | 9.3% | 4/8 | 444k | $0.0181 |
+| **1,000** | **24.3%** | **20/20** | **7.1%** | **7/8** | **412k** | **$0.0170** |
+| 2,000 | 8.8% | 20/20 | 4.6% | 8/8 | 395k | $0.0164 |
+
+Every request finished in under a second. Smaller chunks save more on both corpora, but on the real sessions they omitted most of the text the agent went on to need; RepoQA's specific tasks never lost the gold line. Statify uses **1,000**, the smallest size that kept 7 of 8 needed ranges. Limits: 8 weak labels from one session, one provider, the unchanged `≤0.15` rule; Jeff was not measured because its server was stopped during the sweep.

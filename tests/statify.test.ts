@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as zod from "@oh-my-pi/omptype/zod";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { countTokens } from "@oh-my-pi/pi-natives";
+import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import statify, {
 	readArchive,
 	statifyAssistantContext,
@@ -54,6 +54,9 @@ async function restore(dir: string, display: string): Promise<string> {
 		last = match.index + match[0].length;
 	}
 }
+/** Chunk size that splits `text` into exactly `count` chunks, independent of the tuned default. */
+const split = (text: string, count: number, encoding = Encoding.Jev) =>
+	Math.ceil(countTokens(text, encoding) / count);
 
 function decisions(
 	scores: number[],
@@ -117,6 +120,7 @@ test("archives before request, selects verbatim fragments, and restores omitted 
 		key: "test-key",
 		consent: true,
 		mode: "replace",
+		chunkTokens: split(longText, 3),
 		fetcher,
 		onRequest: () => {
 			requests++;
@@ -194,6 +198,7 @@ test("irrelevant chunks are omitted without hiding an uncertain answer or OMP re
 		key: "test-key",
 		consent: true,
 		mode: "replace",
+		chunkTokens: split(text, 4),
 		fetcher: decisions([0.15, 0.5, 0.5, 0.01]),
 	});
 	if (!result) throw new Error("Expected omitted chunks");
@@ -227,9 +232,10 @@ test("a numbered Python declaration stays with its decorator, docstring, and bod
 		"",
 	].join("\n");
 	const tail = Array.from(
-		{ length: 120 },
+		{ length: 114 },
 		(_, i) => `${i + 67}: unrelated_${i}=lookup(value)\n`,
 	).join("");
+	// With three equal chunks the first raw cut lands inside the decorated block.
 	const text = header + prefix + block + tail;
 	let inspected = false;
 	await statifyResult(tool(text), {
@@ -238,11 +244,12 @@ test("a numbered Python declaration stays with its decorator, docstring, and bod
 		key: "test-key",
 		consent: true,
 		mode: "shadow",
-		fetcher: decisions([0.5, 0.5, 0.5, 0.5], async (body) => {
+		chunkTokens: split(text, 3),
+		fetcher: decisions([0.5, 0.5, 0.5], async (body) => {
 			inspected = true;
 			const chunks = Object.values(body.questions).map((q) => q.instructions);
 			const target = chunks.find((chunk) => chunk.includes("def target()"));
-			expect(chunks).toHaveLength(4);
+			expect(chunks).toHaveLength(3);
 			expect(chunks[0]).not.toContain("@trace");
 			expect(target).toContain("@trace");
 			expect(target).toContain('"""Handle the target request."""');
@@ -261,6 +268,7 @@ test("all-low chunks still have a receipt; shadow and non-shrinking results leav
 		key: "test-key",
 		consent: true,
 		mode: "replace" as const,
+		chunkTokens: split(text, 3),
 	};
 	const none = await statifyResult(tool(text), {
 		...base,
@@ -280,14 +288,13 @@ test("all-low chunks still have a receipt; shadow and non-shrinking results leav
 	).toBeUndefined();
 	await expect(readdir(shadow)).rejects.toThrow();
 	const noOp = join(dir, "no-op");
-	// Line breaks end chunks at 1095, 2190, and 3990, leaving a 10-character last chunk.
-	const line = (length: number) => `${"x".repeat(length)}\n`;
-	const short = line(1_094) + line(1_094) + line(1_799) + "z".repeat(10);
+	// Dropping one ~105-character chunk saves less than the receipt costs.
 	expect(
-		await statifyResult(tool(short), {
+		await statifyResult(tool(text), {
 			...base,
 			archive: noOp,
-			fetcher: decisions([0.99, 0.99, 0.99, 0.01]),
+			chunkTokens: split(text, 40),
+			fetcher: decisions([...Array<number>(39).fill(0.99), 0.01]),
 		}),
 	).toBeUndefined();
 	expect(await readdir(noOp)).toEqual([]);
@@ -307,6 +314,7 @@ test("a shorter receipt that costs more model tokens leaves the original output 
 		key: "test-key",
 		consent: true,
 		mode: "replace",
+		chunkTokens: split(text, 6),
 		fetcher: decisions([0.99, 0.99, 0.99, 0.99, 0.99, 0.01], async () => {
 			const [filename] = await readdir(dir);
 			if (!filename) throw new Error("Archive missing before decision");
@@ -327,6 +335,7 @@ test("non-read tool output, including errors, is filtered and recoverable", asyn
 		key: "test-key",
 		consent: true,
 		mode: "replace",
+		chunkTokens: split(longText, 3),
 		fetcher: decisions([0.01, 0.99, 0.01]),
 	});
 	if (!result) throw new Error("Expected filtered shell output");
@@ -361,6 +370,7 @@ test("context filters past assistant prose without changing user or instruction 
 		key: "test-key",
 		consent: true,
 		mode: "replace" as const,
+		chunkTokens: split(longText, 3),
 		fetcher: decisions([0.01, 0.99, 0.01], async () => {
 			calls++;
 		}),
@@ -419,7 +429,6 @@ test("bypass keeps short, images, skill, plan, explicit full request, and suspec
 		tool(longText, "read", false, "local://repair-plan.md"),
 		tool(`[Could not read src/thing.ts: missing]\n${longText}`),
 		tool(`OPENROUTER_API_KEY=secret\n${longText}`),
-		tool("x".repeat(25_000)),
 		{
 			...tool(longText),
 			content: [{ type: "image" as const, data: "abc", mimeType: "image/png" }],
@@ -512,6 +521,7 @@ test("Unicode boundaries reject half a surrogate, accept exact whole range", asy
 		key: "test-key",
 		consent: true,
 		mode: "replace",
+		chunkTokens: split(text, 3),
 		fetcher: decisions([0.01, 0.99, 0.01]),
 	});
 	const id = result && receiptId(result.content[0].text);
@@ -533,6 +543,7 @@ test("Jeff accepts a local unauthenticated decision and preserves the archive", 
 		provider: "jeff",
 		consent: true,
 		mode: "replace",
+		chunkTokens: split(longText, 3, Encoding.Qwen3),
 		observe: (value) => {
 			observation = value;
 		},

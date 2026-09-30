@@ -10,7 +10,7 @@ import type {
 	SessionEntry,
 	ToolResultEvent,
 } from "@oh-my-pi/pi-coding-agent";
-import { countTokens } from "@oh-my-pi/pi-natives";
+import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import {
 	DEFAULT_JEFF_MODEL,
 	deleteJeffModel,
@@ -56,8 +56,9 @@ import {
 } from "./settings";
 
 const MIN_LENGTH = 4_000;
-const CHUNK_LENGTH = 1_800;
-const MAX_QUESTIONS = 12;
+// Classifier tokens per chunk; the chunk count follows from the output size. A Jev
+// sweep (docs/benchmarks.md) found smaller chunks hid text the agent later needed.
+const CHUNK_TOKENS = 1_000;
 const MAX_READ = 8_000;
 // Three-word archive IDs; UUIDs name archives written by earlier Statify versions.
 const ID =
@@ -108,6 +109,8 @@ export type StatifyOptions = {
 		scores: number[];
 		selected: string[];
 	}) => void;
+	/** Classifier tokens per chunk; benchmarks sweep it. */
+	chunkTokens?: number;
 };
 export type StatifyObservation = {
 	status: "bypass" | "api_error" | "shadow" | "no_op" | "replaced";
@@ -143,16 +146,19 @@ export function statifyMode(
 		return value;
 }
 
-function chunks(text: string): Span[] {
+/** Splits text into `count` near-equal chunks, snapped to structural boundaries. */
+function chunks(text: string, count: number): Span[] {
 	const spans: Span[] = [];
 	// Prefer a blank line before a top-level declaration/comment in OMP's
 	// numbered read output (or in raw source), without making chunks much smaller.
 	const block = /\r?\n(?:\d+(?:-\d+)?:)?[ \t]*\r?\n(?=(?:\d+(?:-\d+)?:)?\S)/g;
 	let start = 0;
-	while (start < text.length) {
-		let end = Math.min(start + CHUNK_LENGTH, text.length);
+	for (let left = Math.max(1, count); start < text.length; left--) {
+		// Aim at an equal share of what remains, so snapping never leaves a tiny tail.
+		const length = Math.ceil((text.length - start) / left);
+		let end = Math.min(start + length, text.length);
 		if (end < text.length) {
-			block.lastIndex = start + CHUNK_LENGTH - 400;
+			block.lastIndex = start + Math.floor((length * 3) / 4);
 			let boundary = 0;
 			for (;;) {
 				const match = block.exec(text);
@@ -162,7 +168,7 @@ function chunks(text: string): Span[] {
 			if (boundary) end = boundary;
 			else {
 				const lastBreak = text.lastIndexOf("\n", end - 1);
-				if (lastBreak > start + CHUNK_LENGTH / 2) end = lastBreak + 1;
+				if (lastBreak > start + length / 2) end = lastBreak + 1;
 			}
 			// A UTF-16 range must never split a surrogate pair.
 			if (
@@ -308,16 +314,14 @@ export async function statifyResult(
 	const content = event.content[0];
 	if (content?.type !== "text") return;
 	const text = content.text;
-	if (text.length > MAX_QUESTIONS * CHUNK_LENGTH) {
-		observe({ status: "bypass" });
-		return;
-	}
-	const spans = chunks(text);
-	// A partial classification cannot safely discard the unexamined remainder.
-	if (spans.length > MAX_QUESTIONS) {
-		observe({ status: "bypass" });
-		return;
-	}
+	// Jev and Jeff (Qwen 3.5) count tokens differently; size chunks for the one classifying.
+	const spans = chunks(
+		text,
+		Math.ceil(
+			countTokens(text, provider === "jeff" ? Encoding.Qwen3 : Encoding.Jev) /
+				(options.chunkTokens ?? CHUNK_TOKENS),
+		),
+	);
 	let archived: string | undefined;
 	let keepArchive = false;
 	try {
@@ -540,11 +544,7 @@ export async function statifyAssistantContext(
 			if (part?.type !== "text" || part.text.startsWith("[statify: "))
 				return message;
 			const text = part.text;
-			if (
-				text.length < MIN_LENGTH ||
-				text.length > MAX_QUESTIONS * CHUNK_LENGTH
-			)
-				return message;
+			if (text.length < MIN_LENGTH) return message;
 			const key = createHash("sha256")
 				.update(options.provider ?? "jev")
 				.update("\0")
