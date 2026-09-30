@@ -2,6 +2,12 @@
 
 Statify has an **experimental, explicitly selected local Jeff provider** alongside default Jev. Both providers now use `replace` after explicit `/statify on`; selecting Jeff while Statify is off does not enable filtering or start the server, but enabling Jeff lets Statify manage its local service automatically. This default is a deliberate risk, **not** evidence of safe omission: a [paired 0.8B benchmark](benchmarks.md#paired-jev--local-jeff-08b-relevance-and-latency) found a required code line omitted and a wrong main-model answer. `--statify-mode=shadow` remains an explicit diagnostic option. The original research pinned [firelex/jeff at `db4a13d8db0dc9bd84100b97498620b5f396e25c`](https://github.com/firelex/jeff/tree/db4a13d8db0dc9bd84100b97498620b5f396e25c) and its predecessor [denis-pplx/autojev at `ee63c1515980491a742f0bd0685c8dc5ca1f00c3`](https://github.com/denis-pplx/autojev/tree/ee63c1515980491a742f0bd0685c8dc5ca1f00c3). For installed-plugin setup, see [Local inference on macOS](local-inference.md#jeff-server).
 
+## Update — 2026-09-30
+
+Upstream released v1.1 for Qwen3.5-0.8B and 2B on **29 Sep 2026**, with **254 options**. Published 0.8B calibration error improved **0.049 → 0.021**, while JevBench hard changed **47.6% → 46.7%** for 0.8B and **53.3% → 57.1%** for 2B; 2B overall changed **83.1% → 82.0%**. These are upstream metrics, not Statify measurements ([0.8B v1.1 model card](https://huggingface.co/mstrasser/Jeff-Qwen3.5-0.8B/blob/8e6694a5a96394dddbf3802a1b9ca4065e254409/README.md), [2B v1.1 model card](https://huggingface.co/mstrasser/Jeff-Qwen3.5-2B/blob/6b0ee356755b7d02e1731b807382bc5403d88dbf/README.md)).
+
+Statify's default pin remains `d66458d54426fcf52046b896261df8909bbc8b05`, verified to have identical weight LFS hashes to 0.8B **v1.0**. 0.8B v1.1 and 2B v1.1 are now selectable through `/statify` → Jeff → **Models**, but neither has been benchmarked with Statify. Gemma4-E2B has no Jeff MLX support and is excluded from the managed catalog. The research and benchmark tables below preserve the original v1.0 snapshot, including its 26-option limit and measured omission failure; they do not describe v1.1 results. See the [pinned catalog and lifecycle](architecture.md#checkpoint-catalog-and-downloads) and [manual checkpoint selection](local-inference.md#jeff-server).
+
 ## Summary
 
 - Jeff is an open-source local decision server with small, trained Jev-style classifiers and a separate probability readout; it is not a TypeSafe product.

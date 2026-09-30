@@ -46,8 +46,16 @@ uv run --no-sync hf download mstrasser/Jeff-Qwen3.5-0.8B --revision d66458d54426
 '''
 
 [tasks."jeff:serve"]
-description = "Run the local Jeff server (MLX, Jeff-Qwen3.5-0.8B) on 127.0.0.1:8765; set JEFF_PORT to change the port"
+description = "Run the local Jeff server (MLX) on 127.0.0.1:8765; JEFF_PORT changes the port, JEFF_MODEL_DIR selects checkpoints/<dir> (default jeff-0.8b)"
 run = '''
 cd "${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}"
-JEFF_BACKEND=mlx JEFF_CHECKPOINT=checkpoints/jeff-0.8b JEFF_HOST=127.0.0.1 PORT="${JEFF_PORT:-8765}" exec uv run --no-sync jeff-serve
+JEFF_BACKEND=mlx JEFF_CHECKPOINT="checkpoints/${JEFF_MODEL_DIR:-jeff-0.8b}" JEFF_HOST=127.0.0.1 PORT="${JEFF_PORT:-8765}" exec uv run --no-sync jeff-serve
+'''
+
+[tasks."jeff:model"]
+description = "Download a pinned Jeff checkpoint; set JEFF_MODEL_REPO, JEFF_MODEL_REVISION and JEFF_MODEL_DIR"
+run = '''
+set -eu
+cd "${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}"
+exec uv run --no-sync hf download "$JEFF_MODEL_REPO" config.json decision_config.json model.safetensors readout.safetensors tokenizer.json tokenizer_config.json chat_template.jinja processor_config.json --revision "$JEFF_MODEL_REVISION" --local-dir "checkpoints/$JEFF_MODEL_DIR"
 '''

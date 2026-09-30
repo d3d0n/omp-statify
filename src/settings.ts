@@ -11,12 +11,14 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
+import { DEFAULT_JEFF_MODEL, findJeffModel } from "./jeff-models";
 
 export type StatifySettings = {
 	enabled: boolean;
 	statusline: boolean;
 	provider: "jev" | "jeff";
 	jeffUrl: string;
+	jeffModel: string;
 };
 export const DEFAULT_JEFF_URL = "http://127.0.0.1:8765";
 const defaults: StatifySettings = {
@@ -24,6 +26,7 @@ const defaults: StatifySettings = {
 	statusline: true,
 	provider: "jev",
 	jeffUrl: DEFAULT_JEFF_URL,
+	jeffModel: DEFAULT_JEFF_MODEL,
 };
 
 export function parseJeffUrl(input: string): string {
@@ -80,7 +83,9 @@ function validateSettings(data: unknown, legacy = false): StatifySettings {
 			value.provider !== "jev" &&
 			value.provider !== "jeff") ||
 		((value.jeffUrl !== undefined || !legacy) &&
-			typeof value.jeffUrl !== "string")
+			typeof value.jeffUrl !== "string") ||
+		(("jeffModel" in value || !legacy) &&
+			(typeof value.jeffModel !== "string" || !findJeffModel(value.jeffModel)))
 	)
 		throw new Error("Invalid Statify settings; disabled until repaired");
 	return {
@@ -88,6 +93,7 @@ function validateSettings(data: unknown, legacy = false): StatifySettings {
 		statusline: value.statusline,
 		provider: (value.provider ?? "jev") as StatifySettings["provider"],
 		jeffUrl: parseJeffUrl((value.jeffUrl ?? DEFAULT_JEFF_URL) as string),
+		jeffModel: (value.jeffModel ?? DEFAULT_JEFF_MODEL) as string,
 	};
 }
 

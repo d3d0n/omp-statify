@@ -1,6 +1,6 @@
 {
 	"name": "omp-statify",
-	"version": "0.2.0-dev.5",
+	"version": "0.2.0-dev.6",
 	"description": "Jev-powered context filtering for Oh-my-pi",
 	"type": "module",
 	"bin": {
@@ -16,6 +16,7 @@
 		"src/key-input.ts",
 		"src/jeff-setup.ts",
 		"src/jeff-server.ts",
+		"src/jeff-models.ts",
 		"src/manage.ts",
 		"src/settings.ts",
 		"README.md",

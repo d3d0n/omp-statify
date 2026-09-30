@@ -38,7 +38,9 @@ Requires an Apple Silicon Mac.
 
 In the Jeff menu you can start, stop, or restart the server, view its logs, and switch to another server or port — for example, when the usual port is already taken.
 
-If the server keeps failing, choose **Reinstall Jeff**: after asking, it downloads Jeff again (about 2 GB). [Jeff setup and troubleshooting](docs/setup.md#jeff-experimental-local-provider).
+Choose **Models** in the Jeff menu to download another model (0.8B v1.1 or 2B v1.1), switch models, or delete unused ones. Downloads run in the background with progress in the statusline. The 2B model is more accurate on benchmarks, but is slower, needs more memory, and has a 4.4 GB download. Only the default 0.8B v1.0 has been tested with Statify.
+
+If the server keeps failing, choose **Reinstall Jeff**: after asking, it downloads Jeff and the active model again. [Jeff setup and troubleshooting](docs/setup.md#jeff-experimental-local-provider).
 
 If setup or the server fails, ask OMP “why did Statify setup fail?” — the bundled **statify-troubleshooting** skill reads the logs.
 

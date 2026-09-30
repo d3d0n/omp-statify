@@ -1,10 +1,10 @@
 ---
 name: statify-troubleshooting
 description: >
-  Diagnose omp-statify/Statify problems from local logs: failed Jeff installation,
-  Jeff server failed, stopped, unreachable or not starting, Jev key/OpenRouter
-  errors, and statusline ! warnings. Use when /statify setup fails or the user
-  asks why Statify, Jev, or Jeff isn't working.
+  Diagnose omp-statify/Statify problems from local logs: failed Jeff installation
+  or failed/stalled model downloads, Jeff server failed, stopped, unreachable or
+  not starting, Jev key/OpenRouter errors, and statusline ! warnings. Use when
+  /statify setup fails or the user asks why Statify, Jev, or Jeff isn't working.
 ---
 
 # Diagnose Statify
@@ -18,10 +18,10 @@ description: >
 
 ## Locate the evidence
 
-- Profile: `$PI_CODING_AGENT_DIR` or `~/.omp/agent`. Contains `statify.json`, `statify-jeff-setup.log`, `statify-jeff-server.log`, `statify-jeff-server.json`, and `statify-jeff-leases/` (one lease per OMP PID). Files are 0600; the lease directory is 0700 (the profile directory's permissions are unchanged). Server record: `{pid, url, startedAt}`. Server log is truncated at each start; setup log at each install attempt. Above 1 MiB, the server log is trimmed to the last 256 KiB at a full-line boundary with `[statify: log trimmed at <ISO time>]`; this is expected.
-- Installed plugin: `~/.omp/plugins/node_modules/omp-statify`; its `mise.toml` defines `jeff:setup` and `jeff:serve`. Use the actual absolute plugin path if installed elsewhere.
-- Jeff: `${JEFF_DIR:-~/.local/share/omp-statify/jeff}`. Installation requires both `.venv` and `checkpoints/jeff-0.8b/model.safetensors`.
-- OMP JSONL logs: `~/.omp/logs/omp.<YYYY-MM-DD>.<pid>.log`. Messages start with `statify`: `usage`, `decision`, `jeff health`, `jeff server started`, `jeff server stopped`, `jeff server exited`, `jeff setup failed`.
+- Profile: `$PI_CODING_AGENT_DIR` or `~/.omp/agent`. Contains `statify.json`, `statify-jeff-setup.log`, `statify-jeff-server.log`, `statify-jeff-server.json`, and `statify-jeff-leases/` (one lease per OMP PID). Files are 0600; the lease directory is 0700 (the profile directory's permissions are unchanged). Server record: `{pid, url, startedAt, model?}`; missing `model` means `jeff-0.8b`. Server log is truncated at each start; setup log at each install attempt. Model downloads append sanitized `== Download <label> <ISO time> ==` sections to the setup log. Above 1 MiB, the server log is trimmed to the last 256 KiB at a full-line boundary with `[statify: log trimmed at <ISO time>]`; this is expected.
+- Installed plugin: `~/.omp/plugins/node_modules/omp-statify`; its `mise.toml` defines `jeff:setup`, `jeff:serve`, and `jeff:model`. Use the actual absolute plugin path if installed elsewhere. Model repositories and pinned revisions are in `src/jeff-models.ts`.
+- Jeff: `${JEFF_DIR:-~/.local/share/omp-statify/jeff}`. Models live in `checkpoints/<id>`: `jeff-0.8b` (default 0.8B v1.0), `jeff-0.8b-v1.1`, or `jeff-2b-v1.1`. Installation readiness requires `.venv` and the selected model's `config.json`, `decision_config.json`, `model.safetensors`, and `readout.safetensors`. Each download also includes `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`, and `processor_config.json` (eight files total).
+- OMP JSONL logs: `~/.omp/logs/omp.<YYYY-MM-DD>.<pid>.log`. Messages start with `statify`: `usage`, `decision`, `jeff health`, `jeff server started`, `jeff server stopped`, `jeff server exited`, `jeff setup failed`, `jeff model download failed`.
 
 ## Read-only triage
 
@@ -36,15 +36,18 @@ tail -n 80 "$profile/statify-jeff-setup.log"
 cat "$profile/statify-jeff-server.json"
 tail -n 80 "$profile/statify-jeff-server.log"
 ls -ld "$profile/statify.key" "$profile/statify-jeff.key"
-ls -ld "$jeff/.venv" "$jeff/checkpoints/jeff-0.8b/model.safetensors"
+# Set model to the jeffModel ID in statify.json; missing field means jeff-0.8b.
+model="jeff-0.8b"
+ls -ld "$jeff/.venv" "$jeff/checkpoints/$model"
+ls -l "$jeff/checkpoints/$model/config.json" "$jeff/checkpoints/$model/decision_config.json" "$jeff/checkpoints/$model/model.safetensors" "$jeff/checkpoints/$model/readout.safetensors"
 uname -sm
 mise --version
 grep -h '"message":"statify' "$HOME"/.omp/logs/omp.*.log | tail -n 80
 ```
 
-1. Check `enabled`, `provider`, `jeffUrl`, and `/statify status`. Missing settings mean disabled Jev defaults; Jeff defaults to `http://127.0.0.1:8765`. An `!` is actionable: invalid mode/settings, missing key, server not installed/stopped/failed, or a request error. `record` makes no provider requests; `shadow` classifies but keeps originals. Errors retain originals.
-   Jeff enabled in `replace`/`shadow` but not ready shows `· paused` and keeps originals; starting shows elapsed seconds, and `port N busy` means startup is blocked. Jeff reports classifier input tokens with zero output tokens, so `(N used)` is expected for Jeff too, not evidence of OpenRouter traffic; it supplies no USD cost.
-2. For setup failures, identify the first failed command and its exit/error in the setup log, not just the final task wrapper. Check platform (`Darwin arm64`) and mise preflight.
+1. Check `enabled`, `provider`, `jeffUrl`, `jeffModel`, and `/statify status`. Missing settings mean disabled Jev defaults; Jeff defaults to `http://127.0.0.1:8765` and model `jeff-0.8b`. An `!` is actionable: invalid mode/settings, missing key, server not installed/stopped/failed, model not downloaded, or a request error. `record` makes no provider requests; `shadow` classifies but keeps originals. Errors retain originals.
+   Jeff enabled in `replace`/`shadow` but not ready shows `· paused` and keeps originals; `model not downloaded · paused` means `.venv` exists but the selected checkpoint is incomplete or absent. Download that model through **Models** before starting. Starting shows elapsed seconds, and `port N busy` means startup is blocked. The provider label is `Jeff <short>`; `↓ <short> <pct>%` shows background download progress, not server startup. Jeff reports classifier input tokens with zero output tokens, so `(N used)` is expected for Jeff too, not evidence of OpenRouter traffic; it supplies no USD cost.
+2. For setup failures, identify the first failed command and its exit/error in the setup log, not just the final task wrapper. Check platform (`Darwin arm64`) and mise preflight. For failed or stalled model downloads, find the matching `== Download <label> <ISO time> ==` section in that same log and read its output and `exit <code>`, `cancelled`, or `error <message>` footer. Correlate timestamps and disk-byte progress before calling it stalled; inspect DNS/TLS/network errors, HF 401/403/404/429, timeouts, and disk-full errors. Downloads may retain hidden partial files, and progress is an estimate based on directory size, not proof of completion. Cancellation (including session shutdown) keeps partial files; choosing **Download** again resumes them.
 3. For runtime failures, read the record and server tail. Substitute its numeric PID below; compare trimmed output with `startedAt`. A dead/reused PID is failed ownership, not permission to kill another process.
 
 ```sh
@@ -72,14 +75,14 @@ Health `status: ready` proves readiness, not installation alone. Connection refu
 | `mise ... install uv` fails | Pinned uv installation/download problem | Use the actual stderr to repair network, permissions, or mise configuration; retry `mise -C "$plugin" install uv`. |
 | git clone/fetch DNS, TLS, connection errors | GitHub/network access failure | Repair connectivity/proxy/certificates, then rerun setup; do not disable TLS verification. |
 | `uv python pin` / `uv sync --locked` fails | Python/dependency network failure or lockfile mismatch | Repair network if indicated; rerun pinned setup for mismatch. Never unlock, edit the lockfile, or substitute dependency versions. |
-| `hf download` 401/403 | Hugging Face authorization/access failure | Verify model access and approved authentication outside chat; retry setup after resolving it. |
-| `hf download` 404 | Pinned model/revision unavailable | Confirm the exact pinned repo/revision in plugin `mise.toml`; report unavailable pin, do not silently choose another model. |
-| `hf download` 429 / timeout | Download throttling/network | Wait/retry or repair connectivity, then rerun setup. |
-| `No space left on device` | Disk full during install/download | Check available storage and ask before removing anything; free space, rerun setup. |
+| `hf download` 401/403 | Hugging Face authorization/access failure | Verify model access and approved authentication outside chat; retry **Models → Download** (or setup for installer failures) after resolving it. |
+| `hf download` 404 | Pinned model/revision unavailable | Confirm the selected model's exact repo/revision in plugin `src/jeff-models.ts` (default setup pin also in `mise.toml`); report unavailable pin, do not silently choose another model. |
+| `hf download` 429 / timeout / DNS or TLS errors | Download throttling/network | Wait/retry or repair connectivity without disabling TLS verification, then resume through **Models → Download** (or rerun setup for installer failures). |
+| `No space left on device` | Disk full during install/download | Check available storage and ask before removing anything; free space, then resume the download. **Delete partial files** is available for an inactive incomplete model; the active model cannot be deleted. |
 | `Address already in use` / `[Errno 48]` / statusline `port N busy` | Port occupied | Open `/statify` → Jeff → **Servers & ports**: connect to a listed Jeff server (**this profile**/**external**), choose **Random free port**, or **Enter endpoint…**. Headless: `/statify jeff servers`, then `/statify jeff-url random` or a validated endpoint. Do not kill the port owner. Interactive startup offers these choices; automatic/headless startup only warns. |
-| `ModuleNotFoundError` / missing checkpoint | Incomplete/stale Jeff environment or model | Rerun **Install / update Jeff**; setup uses pinned Python/dependencies and model. |
+| `ModuleNotFoundError` / missing checkpoint / `model not downloaded · paused` | Incomplete/stale Jeff environment or selected model | For missing model files, use **Models → Download** for the selected ID; partial downloads resume. For missing Python/dependencies, rerun **Install / update Jeff**. |
 | Uvicorn shutdown lines, then `[jeff:serve] ERROR task failed` | Normal signal stop | No repair if it follows an intentional stop; do not diagnose the wrapper line alone as a crash. |
-| Repeated server exits/failures after checking the first error | Broken local environment/model may need a clean pinned install | Offer `/statify` → Jeff → **Reinstall Jeff**; confirmation deletes only `<jeffDir>/.venv` and `<jeffDir>/checkpoints/jeff-0.8b`, then downloads about 2 GB again. Statify stops its managed server first and starts after success when Jeff is enabled; never delete the checkout or shared caches. |
+| Repeated server exits/failures after checking the first error | Broken local environment/model may need a clean pinned install | Offer `/statify` → Jeff → **Reinstall Jeff**; confirmation deletes only `<jeffDir>/.venv` and the active model's `<jeffDir>/checkpoints/<id>`, then reinstalls and downloads the active model again. Statify stops its managed server first and starts after success when Jeff is enabled; never delete the checkout, other models, or shared caches. |
 | `[statify: log trimmed at …]` | Expected server-log cap | No repair: logs above 1 MiB retain the last 256 KiB at a full-line boundary. Older output is no longer in that log. |
 | Health has `authentication: true`, Jeff key absent | Server requires its own key | `/statify` → Jeff → **Connection settings** → masked Jeff key dialog; OpenRouter key is unrelated. |
 | Jev `statify usage`: `api_error`, `httpStatus: 401` | Bad/revoked OpenRouter key | Jev → **Edit API key** (or Add API key when absent). |
@@ -92,6 +95,8 @@ Health `status: ready` proves readiness, not installation alone. Connection refu
 Prefer `/statify` → **Jeff** → **Logs**, **Restart server**, **Install / update Jeff**, or **Connection settings**; **Start server** if stopped and enabled. Jev key repairs use **Jev** → **Edit API key**. Headless controls: `/statify jeff start|stop|restart|logs`; `/statify status` shows server state and log paths.
 
 For busy ports prefer **Servers & ports** or `/statify jeff-url random`; choosing an already running Jeff changes the endpoint without starting a duplicate and never stops an external server. For repeated server failures, offer **Reinstall Jeff** with its explicit deletion/download confirmation rather than manual deletion.
+
+For model failures, prefer **Models → Download** to resume, **Cancel download** to stop a stalled attempt, or **Delete partial files** only after approval for an inactive model. One download runs at a time per OMP process. Headless OMP supports `/statify jeff models`, `/statify jeff download <id>`, and `/statify jeff model <id>`. Switching to a downloaded model restarts only a Statify-managed server; external servers keep their running model and must be left alone. Only the default 0.8B v1.0 was tested with Statify; switching models is not proof of a quality fix.
 
 If manual setup is necessary, offer these only after approval: `mise trust "$plugin/mise.toml"`, `mise -C "$plugin" install uv`, `mise -C "$plugin" run jeff:setup`. `jeff:serve` binds loopback and uses `JEFF_PORT` (default 8765); prefer managed controls to creating a second server.
 

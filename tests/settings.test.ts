@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_JEFF_MODEL } from "../src/jeff-models";
 import {
 	DEFAULT_JEFF_URL,
 	parseJeffUrl,
@@ -44,6 +45,7 @@ test("enable and statusline persist without touching other OMP credentials", asy
 			statusline: true,
 			provider: "jev",
 			jeffUrl: DEFAULT_JEFF_URL,
+			jeffModel: DEFAULT_JEFF_MODEL,
 		},
 		dir,
 	);
@@ -53,6 +55,7 @@ test("enable and statusline persist without touching other OMP credentials", asy
 		statusline: true,
 		provider: "jev",
 		jeffUrl: DEFAULT_JEFF_URL,
+		jeffModel: DEFAULT_JEFF_MODEL,
 	});
 	expect((await lstat(join(dir, "statify.key"))).mode & 0o777).toBe(0o600);
 	await removeKey(dir);
@@ -107,6 +110,7 @@ test("CLI accepts a piped key without printing it, then removes it and disables 
 		statusline: true,
 		provider: "jev",
 		jeffUrl: DEFAULT_JEFF_URL,
+		jeffModel: DEFAULT_JEFF_MODEL,
 	});
 	expect(await readKey(dir)).toBeUndefined();
 });
@@ -120,10 +124,14 @@ test("legacy settings default the provider and endpoint; invalid supplied fields
 		statusline: false,
 		provider: "jev",
 		jeffUrl: DEFAULT_JEFF_URL,
+		jeffModel: DEFAULT_JEFF_MODEL,
 	});
 	for (const invalid of [
 		{ provider: "unknown" },
 		{ provider: null },
+		{ jeffModel: "jeff-9b" },
+		{ jeffModel: null },
+		{ jeffModel: 2 },
 		{ jeffUrl: "http://localhost:8765" },
 		{ jeffUrl: null },
 	]) {
@@ -140,6 +148,7 @@ test("legacy settings default the provider and endpoint; invalid supplied fields
 				statusline: false,
 				provider: "jeff",
 				jeffUrl: "http://localhost:8765",
+				jeffModel: DEFAULT_JEFF_MODEL,
 			},
 			dir,
 		),
@@ -151,11 +160,26 @@ test("legacy settings default the provider and endpoint; invalid supplied fields
 				statusline: false,
 				provider: "unknown" as "jev",
 				jeffUrl: DEFAULT_JEFF_URL,
+				jeffModel: DEFAULT_JEFF_MODEL,
 			},
 			dir,
 		),
 	).rejects.toThrow();
 	expect(JSON.parse(await readFile(path, "utf8")).jeffUrl).toBeNull();
+});
+
+test("a non-default Jeff model round-trips through settings", async () => {
+	const dir = await temporary();
+	const settings = { ...(await readSettings(dir)), jeffModel: "jeff-2b-v1.1" };
+	await saveSettings(settings, dir);
+	expect(await readSettings(dir)).toEqual(settings);
+	expect(
+		JSON.parse(await readFile(join(dir, "statify.json"), "utf8")).jeffModel,
+	).toBe("jeff-2b-v1.1");
+	await expect(
+		saveSettings({ ...settings, jeffModel: "jeff-9b" }, dir),
+	).rejects.toThrow();
+	expect(await readSettings(dir)).toEqual(settings);
 });
 
 test("Jeff URL accepts only explicit local HTTP ports", () => {

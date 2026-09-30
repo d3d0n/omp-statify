@@ -11,13 +11,18 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:net";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
+import { DEFAULT_JEFF_MODEL, jeffDir, jeffModelInstalled } from "./jeff-models";
 import { statifyDir } from "./settings";
 
-export type JeffServerRecord = { pid: number; url: string; startedAt: string };
+export type JeffServerRecord = {
+	pid: number;
+	url: string;
+	startedAt: string;
+	model?: string;
+};
 export type JeffServerState =
 	| { status: "stopped" }
 	| { status: "running"; record: JeffServerRecord }
@@ -50,13 +55,12 @@ export function jeffServerPaths(dir = statifyDir()): {
 	};
 }
 
-export function jeffInstalled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const dir =
-		env.JEFF_DIR ||
-		join(env.HOME || homedir(), ".local", "share", "omp-statify", "jeff");
+export function jeffInstalled(
+	env: NodeJS.ProcessEnv = process.env,
+	model = DEFAULT_JEFF_MODEL,
+): boolean {
 	return (
-		existsSync(join(dir, ".venv")) &&
-		existsSync(join(dir, "checkpoints", "jeff-0.8b", "model.safetensors"))
+		existsSync(join(jeffDir(env), ".venv")) && jeffModelInstalled(model, env)
 	);
 }
 
@@ -139,11 +143,13 @@ async function signal(
 
 export async function startJeffServer(options: {
 	url: string;
+	model?: string;
 	dir?: string;
 	command?: string[];
 	env?: Record<string, string | undefined>;
 }): Promise<JeffServerState> {
 	const dir = options.dir ?? statifyDir();
+	const model = options.model ?? DEFAULT_JEFF_MODEL;
 	const state = await jeffServerState(dir);
 	if (state.status === "running") return state;
 	const paths = jeffServerPaths(dir);
@@ -167,7 +173,12 @@ export async function startJeffServer(options: {
 		child = spawn(command[0], command.slice(1), {
 			detached: true,
 			stdio: ["ignore", log.fd, log.fd],
-			env: { ...process.env, ...options.env, JEFF_PORT: port },
+			env: {
+				...process.env,
+				...options.env,
+				JEFF_PORT: port,
+				JEFF_MODEL_DIR: model,
+			},
 		});
 		await new Promise<void>((resolve, reject) => {
 			child.once("spawn", resolve);
@@ -191,6 +202,7 @@ export async function startJeffServer(options: {
 		pid,
 		url: options.url,
 		startedAt: await startedAt(pid),
+		model,
 	};
 	// ponytail: record/lease races are best-effort across processes; use a profile lock if strict coordination becomes necessary.
 	try {

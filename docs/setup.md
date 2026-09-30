@@ -13,9 +13,9 @@ OMP discovers the package's `src/index.ts` automatically from its plugin manifes
 
 Open `/statify` in OMP. The menu has four actions: **Jev · cloud**, **Jeff · local (experimental)**, **Enable/Disable Statify**, and **Show/Hide statusline**. Provider menus contain their setup and key controls. After an action, the cursor stays on the chosen item; if that item disappears, it stays at the nearest available position. This applies to the main, provider, and connection-settings menus. Escape goes back; Escape from the main menu closes it.
 
-Filtering starts **off**. The statusline is visible by default for new profiles; an existing visibility choice is preserved. Its format is `<icon> Statify · <Jev|Jeff> · <segments>`. `●` means active, `◐` means starting/loading or processing a request, `!` means attention is needed, and `○` means off or record mode. It shows the mode (`replace`, `shadow`, or `record`), missing-key or invalid-mode warnings, and Jeff's server state (`ready`, `loading`, `starting`, `stopped`, `failed`, or `not installed`). An external server appears as ready. While requests are in flight, `classifying` replaces the active mode, with `classifying ×N` for multiple requests.
+Filtering starts **off**. The statusline is visible by default for new profiles; an existing visibility choice is preserved. Its format is `<icon> Statify · <provider> · <segments>`, with provider `Jev` or `Jeff <short>` (`Jeff 0.8B`, `Jeff 0.8B v1.1`, or `Jeff 2B`). `●` means active, `◐` means starting/loading or processing a request, `!` means attention is needed, and `○` means off or record mode. It shows the mode (`replace`, `shadow`, or `record`), missing-key or invalid-mode warnings, and Jeff's server state (`ready`, `loading`, `starting`, `stopped`, `failed`, or `not installed`). An external server appears as ready. While requests are in flight, `classifying` replaces the active mode, with `classifying ×N` for multiple requests.
 
-When Jeff is enabled in `replace` or `shadow` but not ready, the statusline ends in `· paused`: originals are kept. A managed startup shows elapsed seconds, updated every second; a blocked start shows `port N busy`.
+When Jeff is enabled in `replace` or `shadow` but not ready, the statusline shows `· paused`: originals are kept. If the environment exists but the selected model is missing, it shows `model not downloaded · paused`. A managed startup shows elapsed seconds, updated every second; a blocked start shows `port N busy`. A background model download appends `· ↓ <short> <pct>%` in any state, refreshed every second.
 
 After a completed provider request, `last −<saved> tok` shows tokens saved by the latest replacement, `last kept` means no replacement (including shadow mode), and `last error` means the request failed. Every `last` segment appends `(<used> used)` when classifier input+output usage is known: for example, `last −1.6k tok (2.1k used)`, `last kept (493 used)`, or `last error (493 used)` when the provider returned usage. `Σ −<saved>` shows this session's total savings when positive. Counts use integers below 1,000, then compact `k`/`M` units. Bypassed output does not affect these stats; stats reset with each OMP session and are hidden when off or in record mode.
 
@@ -26,15 +26,17 @@ Examples:
 ```text
 ○ Statify · Jev · off
 ● Statify · Jev · replace · last −1.6k tok (2.1k used) · Σ −8.4k
-◐ Statify · Jeff · server starting 4s · paused
-! Statify · Jeff · server stopped · paused
-! Statify · Jeff · server failed · paused
-! Statify · Jeff · not installed · paused
-! Statify · Jeff · port 8765 busy · paused
-● Statify · Jeff · server ready · replace · last −920 tok (493 used) · Σ −3.1k
+◐ Statify · Jeff 0.8B · server starting 4s · paused
+! Statify · Jeff 0.8B · server stopped · paused
+! Statify · Jeff 0.8B · server failed · paused
+! Statify · Jeff 0.8B · not installed · paused
+! Statify · Jeff 0.8B · port 8765 busy · paused
+! Statify · Jeff 2B · model not downloaded · paused
+○ Statify · Jeff 0.8B · off · ↓ 2B 43%
+● Statify · Jeff 0.8B · server ready · replace · last −920 tok (493 used) · Σ −3.1k
 ```
 
-The statusline updates on session/turn start, after controls and provider requests, and while a managed server starts. Jeff's **Check connection** refreshes readiness while idle; the result stays visible in the Jeff menu title and item, and the cursor stays on **Check connection**. A saved key is not proof that the provider accepts it.
+The statusline updates on session/turn start, after controls and provider requests, while a managed server starts, and while a model downloads. Jeff's **Check connection** refreshes readiness while idle; the result stays visible in the Jeff menu title and item, and the cursor stays on **Check connection**. A saved key is not proof that the provider accepts it.
 
 ## Jev: add an OpenRouter key and enable
 
@@ -71,15 +73,21 @@ When enabled in `replace` or `shadow` mode, Jeff starts automatically on OMP ses
 
 While Jeff is enabled, its menu offers **Start server**, **Stop server**, and **Restart server** as appropriate. Stopping the server keeps Jeff selected; output stays unchanged until you start it again. **Check connection** reports readiness. **Logs** opens the server and setup log tails, each headed by its absolute path. If startup fails or takes more than two minutes, Statify points you to the logs.
 
-Logs live in the active profile directory (`~/.omp/agent/` by default, or `PI_CODING_AGENT_DIR`): `statify-jeff-server.log` contains server output and is replaced at each start; `statify-jeff-setup.log` contains the sanitized installer transcript and is replaced at each install attempt. These files use mode `0600`. Server ownership is recorded in `statify-jeff-server.json`; `statify-jeff-leases/` tracks OMP windows sharing the profile. `/statify status` includes server state (and the managed server's PID) and both log paths. If setup or the server fails, ask OMP “why did Statify setup fail?” — the bundled **statify-troubleshooting** skill reads these logs and OMP's logs.
+Logs live in the active profile directory (`~/.omp/agent/` by default, or `PI_CODING_AGENT_DIR`): `statify-jeff-server.log` contains server output and is replaced at each start; `statify-jeff-setup.log` contains the sanitized installer transcript and is replaced at each install attempt. Model downloads append `== Download <label> <ISO time> ==` sections to that same setup log. These files use mode `0600`. Server ownership is recorded in `statify-jeff-server.json`; `statify-jeff-leases/` tracks OMP windows sharing the profile. `/statify status` includes server state (and the managed server's PID), the selected model and whether it is downloaded, download progress when running, and both log paths. If setup, a download, or the server fails, ask OMP “why did Statify setup fail?” — the bundled **statify-troubleshooting** skill reads these logs and OMP's logs.
 
 The installer uses the packaged `mise.toml` rather than requiring a Statify checkout or global Jeff/Python installation. It pins uv 0.12.19, Python 3.14, Jeff's server revision and the 0.8B model revision. The Jeff checkout lives under `${JEFF_DIR:-$HOME/.local/share/omp-statify/jeff}`; if overriding `JEFF_DIR`, keep the same environment for installation and serving.
 
 **Servers & ports**, after **Check connection**, lists discovered running Jeff servers with their port, `ready`/`loading` state, and **this profile** or **external** label (plus process details when available). The current endpoint has a check mark; selecting a server connects to it. **Random free port** selects an unused local port and starts a managed server when Jeff is enabled; **Enter endpoint…** accepts a local address. The submenu preserves the cursor after actions.
 
+**Models**, directly after **Servers & ports**, shows the active model and how many models are downloaded, or the current download's progress. Its submenu has one row each for **Jeff 0.8B v1.0** (default, tested with Statify), **Jeff 0.8B v1.1** (better calibrated, not yet tested with Statify), and **Jeff 2B v1.1** (more accurate on benchmarks, about twice as slow and 2.6 times the memory). Rows show an active-model check mark, `downloaded`, `not downloaded`, or `downloading <pct>%`, download size (1.7 GB or 4.4 GB), and a model note. The model and action menus preserve the cursor and include **Back**.
+
+Select a row for **Download (<size>)**, **Cancel download**, **Use this model**, **Delete (frees <size on disk>)**, or **Delete partial files (<size on disk>)**, as applicable. Downloads and deletion ask confirmation. The active model cannot be deleted. Only one model download runs at a time per OMP process; another model's action menu says **Another download is running** instead of offering destructive actions. Incomplete downloads resume with **Download**; cancellation or OMP shutdown keeps partial files. Finishing a download does not select it automatically: choose **Use this model** afterward.
+
+Switching models saves the selection and restarts a Statify-managed server, or starts one when Jeff is enabled and no server is running. External servers keep whatever model they already run; Statify does not restart them. Models live in `<jeffDir>/checkpoints/<id>` with IDs `jeff-0.8b`, `jeff-0.8b-v1.1`, and `jeff-2b-v1.1`.
+
 Before starting on an occupied port, an explicit interactive action offers **Use a random free port**, **Choose a running Jeff server** (when any are found), or **Cancel**. Automatic session startup and headless commands instead warn without starting; open **Servers & ports** or use `/statify jeff-url random`.
 
-**Reinstall Jeff** is available when Jeff is installed or the server failed, and is offered after server failures. It asks confirmation before deleting only `<jeffDir>/.venv` and `<jeffDir>/checkpoints/jeff-0.8b`, then runs the pinned installation again with an approximately 2 GB download; the checkout, other checkpoints, and shared caches are not removed. Statify stops its managed server first and starts it after a successful reinstall when Jeff is enabled.
+**Reinstall Jeff** is available when Jeff is installed or the server failed, and is offered after server failures. It asks confirmation before deleting only `<jeffDir>/.venv` and the active model's `<jeffDir>/checkpoints/<id>` directory, then runs the pinned installation again and downloads the active model if it is not the default. The checkout, other model directories, and shared caches are not removed. Statify stops its managed server first and starts it after a successful reinstall when Jeff is enabled.
 
 While running, server logs above 1 MiB are trimmed to the last 256 KiB, starting at a full line, with a `[statify: log trimmed at <ISO time>]` marker. This expected notice is not an error.
 
@@ -91,11 +99,13 @@ While running, server logs above 1 MiB are trimmed to the last 256 KiB, starting
 
 For interactive or headless/RPC OMP, `/statify jeff servers` lists running Jeff servers and `/statify jeff-url random` selects a free port (and starts Jeff when enabled). `/statify jeff-url <url>` uses the same endpoint-change behavior as the menu.
 
+In interactive or headless/RPC OMP, `/statify jeff models` lists each model's ID, label, and downloaded/active state; `/statify jeff model <id>` selects a downloaded model using the same server restart rules; `/statify jeff download <id>` starts a background download. These are OMP commands, not standalone terminal CLI commands.
+
 Jeff is experimental. See the [paired code test](benchmarks.md#paired-jev--local-jeff-08b-relevance-and-latency) and [Jeff research](jeff.md) for evaluation results and limitations. Both providers use `replace` after explicit enablement unless a launch flag selects another mode. See [local inference](local-inference.md) for manual serving and cleanup.
 
 ## Manage or remove access
 
-Use `/statify` for setup, key management, enable/disable, and statusline visibility. `/statify status` shows detailed state without printing keys. Direct OMP commands remain available: `on|off`, `provider jev|jeff`, `key add|edit|remove`, `jeff-key add|edit|remove`, `jeff setup|start|stop|restart|logs|servers`, `jeff-url <url>|random`, and `statusline on|off`. When `statify` is on your `PATH`, terminal management commands include:
+Use `/statify` for setup, key management, enable/disable, and statusline visibility. `/statify status` shows detailed state without printing keys. Direct OMP commands remain available: `on|off`, `provider jev|jeff`, `key add|edit|remove`, `jeff-key add|edit|remove`, `jeff setup|start|stop|restart|logs|servers|models`, `jeff model <id>`, `jeff download <id>`, `jeff-url <url>|random`, and `statusline on|off`. When `statify` is on your `PATH`, terminal management commands include:
 
 ```sh
 statify status

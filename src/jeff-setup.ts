@@ -1,8 +1,15 @@
 import { appendFile, chmod, mkdir, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import {
+	DEFAULT_JEFF_MODEL,
+	downloadJeffModel,
+	findJeffModel,
+	type JeffDownload,
+	jeffDir,
+	jeffModelPath,
+} from "./jeff-models";
 import { jeffServerPaths } from "./jeff-server";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -41,8 +48,18 @@ function safeOutput(value: string): string {
 export async function setupJeff(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
-	options?: { reinstall?: boolean; beforeRemove?: () => Promise<void> },
+	options?: {
+		reinstall?: boolean;
+		model?: string;
+		beforeRemove?: () => Promise<void>;
+		downloadModel?: (id: string) => JeffDownload;
+	},
 ): Promise<boolean> {
+	const model = options?.model ?? DEFAULT_JEFF_MODEL;
+	if (!findJeffModel(model)) {
+		ctx.ui.notify(`Unknown Jeff model: ${model}`, "warning");
+		return false;
+	}
 	const action = options?.reinstall
 		? "Install / update pinned Jeff"
 		: await ctx.ui.select("Jeff setup (experimental)", [
@@ -88,17 +105,12 @@ export async function setupJeff(
 	} catch {
 		// Log storage errors are best effort; never prevent a consented install.
 	}
-	const jeffDir =
-		process.env.JEFF_DIR ||
-		join(homedir(), ".local", "share", "omp-statify", "jeff");
-	const reinstallPaths = [
-		join(jeffDir, ".venv"),
-		join(jeffDir, "checkpoints", "jeff-0.8b"),
-	];
+	const directory = jeffDir();
+	const reinstallPaths = [join(directory, ".venv"), jeffModelPath(model)];
 	if (options?.reinstall) {
 		const approved = await ctx.ui.confirm(
 			"Reinstall Jeff?",
-			`Delete only these paths:\n${reinstallPaths.join("\n")}\n\nThen reinstall the Python environment and model (~2 GB download).`,
+			`Delete only these paths:\n${reinstallPaths.join("\n")}\n\nThen reinstall the Python environment and ${findJeffModel(model)?.label}. Setup downloads the default checkpoint${model === DEFAULT_JEFF_MODEL ? "" : " and then the selected checkpoint"}.`,
 		);
 		await append(
 			approved
@@ -179,6 +191,20 @@ export async function setupJeff(
 			"info",
 		);
 		if (!(await run(args, 30 * 60 * 1000))) return false;
+	}
+	if (model !== DEFAULT_JEFF_MODEL) {
+		await append(`Downloading selected model: ${model}`);
+		try {
+			const download = options?.downloadModel
+				? options.downloadModel(model)
+				: downloadJeffModel(model, { log });
+			await download.done;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			await append(`Selected model download failed: ${message}`);
+			failed(message);
+			return false;
+		}
 	}
 	await append("Pinned Jeff installation completed.");
 	ctx.ui.notify(

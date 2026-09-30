@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,18 @@ import type {
 	ToolResultEvent,
 } from "@oh-my-pi/pi-coding-agent";
 import { countTokens } from "@oh-my-pi/pi-natives";
+import {
+	DEFAULT_JEFF_MODEL,
+	deleteJeffModel,
+	downloadJeffModel,
+	findJeffModel,
+	JEFF_MODELS,
+	type JeffDownload,
+	jeffDir,
+	jeffModelDiskBytes,
+	jeffModelInstalled,
+	jeffModelPath,
+} from "./jeff-models";
 import type { JeffServerInfo } from "./jeff-server";
 import {
 	acquireJeffLease,
@@ -91,6 +104,8 @@ export type StatifyObservation = {
 };
 
 let jeffQueue: Promise<unknown> = Promise.resolve();
+let modelDownload: JeffDownload | undefined;
+let modelInstalling = false;
 
 function serializeJeff<T>(run: () => Promise<T>): Promise<T> {
 	const request = jeffQueue.then(run, run);
@@ -602,6 +617,17 @@ export default function statify(pi: ExtensionAPI): void {
 	};
 	const providerName = (provider: StatifySettings["provider"]) =>
 		provider === "jev" ? "Jev" : "Jeff (experimental)";
+	const modelLabel = (id: string) => findJeffModel(id)?.label ?? id;
+	const modelSize = (bytes: number) =>
+		bytes < 1e9
+			? `${Math.round(bytes / 1e6)} MB`
+			: `${(bytes / 1e9).toFixed(1)} GB`;
+	const downloadProgress = async () => {
+		const download = modelDownload;
+		if (!download) return undefined;
+		const pct = Math.floor((await download.progress().catch(() => 0)) * 100);
+		return modelDownload === download ? { id: download.id, pct } : undefined;
+	};
 	const stats = new Map<
 		string,
 		{
@@ -638,9 +664,11 @@ export default function statify(pi: ExtensionAPI): void {
 						? "starting"
 						: managed.status === "exited"
 							? "failed"
-							: jeffInstalled()
+							: jeffInstalled(process.env, settings.jeffModel)
 								? "stopped"
-								: "not installed";
+								: existsSync(join(jeffDir(), ".venv"))
+									? "model not downloaded"
+									: "not installed";
 		return { status, server, managed, owner };
 	};
 	const wanted = (settings: StatifySettings) =>
@@ -659,9 +687,16 @@ export default function statify(pi: ExtensionAPI): void {
 		if (settings.provider === "jev") {
 			if (!(await readKey())) return "add key";
 		} else {
+			if (
+				existsSync(join(jeffDir(), ".venv")) &&
+				!jeffModelInstalled(settings.jeffModel)
+			)
+				return "model not downloaded · paused";
 			const { status, server, managed } = await serverStatus(ctx, settings);
 			prefix =
-				status.startsWith("port ") || status === "not installed"
+				status.startsWith("port ") ||
+				status === "not installed" ||
+				status === "model not downloaded"
 					? status
 					: `server ${status === "external" ? server.status : status}`;
 			if (status === "starting" && managed.status === "running") {
@@ -679,7 +714,9 @@ export default function statify(pi: ExtensionAPI): void {
 		return `${prefix}${inFlight ? `classifying${inFlight > 1 ? ` ×${inFlight}` : ""}` : currentMode}`;
 	};
 	let refreshGeneration = 0;
+	let shuttingDown = false;
 	const refreshStatus = async (ctx: ExtensionContext): Promise<void> => {
+		if (shuttingDown) return;
 		const generation = ++refreshGeneration;
 		try {
 			const settings = await readSettings();
@@ -725,10 +762,13 @@ export default function statify(pi: ExtensionAPI): void {
 					current += ` (${tokenText((last.usage.inputTokens ?? 0) + (last.usage.outputTokens ?? 0))} used)`;
 				if (session.saved > 0) current += ` · Σ −${tokenText(session.saved)}`;
 			}
+			const progress = await downloadProgress();
+			if (progress)
+				current += ` · ↓ ${findJeffModel(progress.id)?.short ?? progress.id} ${progress.pct}%`;
 			if (generation !== refreshGeneration) return;
 			ctx.ui.setStatus(
 				"statify",
-				`${ctx.ui.theme.fg(color, idle ? "○" : busy ? "◐" : active ? "●" : "!")} ${ctx.ui.theme.fg("dim", "Statify")} · ${ctx.ui.theme.fg("accent", settings.provider === "jev" ? "Jev" : "Jeff")} · ${ctx.ui.theme.fg(color, current)}`,
+				`${ctx.ui.theme.fg(color, idle ? "○" : busy ? "◐" : active ? "●" : "!")} ${ctx.ui.theme.fg("dim", "Statify")} · ${ctx.ui.theme.fg("accent", settings.provider === "jev" ? "Jev" : `Jeff ${findJeffModel(settings.jeffModel)?.short ?? settings.jeffModel}`)} · ${ctx.ui.theme.fg(color, current)}`,
 			);
 		} catch {
 			if (generation !== refreshGeneration) return;
@@ -737,6 +777,71 @@ export default function statify(pi: ExtensionAPI): void {
 				ctx.ui.theme.fg("error", "! Statify · configuration error · /statify"),
 			);
 		}
+	};
+	let downloadTimer: { timer: Timer; ctx: ExtensionContext } | undefined;
+	const beginDownload = (
+		ctx: ExtensionContext,
+		id: string,
+		announce = true,
+	): JeffDownload => {
+		if (modelDownload) throw new Error("Another download is running");
+		if (modelInstalling && announce)
+			throw new Error(
+				"Jeff installation is running; wait before downloading another model.",
+			);
+		const log = jeffServerPaths().setupLog;
+		const download = downloadJeffModel(id, { log });
+		modelDownload = download;
+		let checking = false;
+		const timer = ctx.setInterval(async () => {
+			if (checking) return;
+			checking = true;
+			try {
+				await refreshStatus(ctx);
+			} catch {
+				// Progress must never break the session.
+			} finally {
+				checking = false;
+			}
+		}, 1000);
+		downloadTimer = { timer, ctx };
+		if (announce)
+			ctx.ui.notify(`Downloading ${modelLabel(id)} in the background…`, "info");
+		void download.done
+			.then(
+				() => {
+					if (announce)
+						ctx.ui.notify(
+							`${modelLabel(id)} downloaded. Choose Use this model in /statify → Jeff → Models.`,
+							"info",
+						);
+				},
+				(error: unknown) => {
+					const message =
+						error instanceof Error ? error.message : String(error);
+					if (message === "Download cancelled")
+						ctx.ui.notify("Download cancelled", "info");
+					else {
+						pi.logger.warn("statify jeff model download failed", {
+							model: id,
+							log,
+						});
+						ctx.ui.notify(`${message}\nLog: ${log}`, "warning");
+					}
+				},
+			)
+			.catch(() => undefined)
+			.finally(() => {
+				if (modelDownload === download) modelDownload = undefined;
+				try {
+					ctx.clearTimer(timer);
+					if (downloadTimer?.timer === timer) downloadTimer = undefined;
+				} catch {
+					// Timer cleanup must fail open.
+				}
+				void refreshStatus(ctx).catch(() => undefined);
+			});
+		return download;
 	};
 	let watcher: { timer: Timer; ctx: ExtensionContext } | undefined;
 	let watcherGeneration = 0;
@@ -815,7 +920,14 @@ export default function statify(pi: ExtensionAPI): void {
 		interactive = ctx.mode === "tui",
 	) => {
 		let settings = await readSettings();
-		if (!jeffInstalled()) {
+		if (!jeffModelInstalled(settings.jeffModel)) {
+			ctx.ui.notify(
+				`Download ${modelLabel(settings.jeffModel)} first: /statify → Jeff → Models`,
+				"warning",
+			);
+			return;
+		}
+		if (!jeffInstalled(process.env, settings.jeffModel)) {
 			ctx.ui.notify("Choose Install / update Jeff first.", "warning");
 			return;
 		}
@@ -856,7 +968,10 @@ export default function statify(pi: ExtensionAPI): void {
 		}
 		if (managed.status !== "running") {
 			ctx.ui.notify("Starting Jeff server…", "info");
-			const result = await startJeffServer({ url: settings.jeffUrl });
+			const result = await startJeffServer({
+				url: settings.jeffUrl,
+				model: settings.jeffModel,
+			});
 			if (result.status === "running")
 				pi.logger.info("statify jeff server started", {
 					pid: result.record.pid,
@@ -890,15 +1005,29 @@ export default function statify(pi: ExtensionAPI): void {
 		}
 	};
 	const install = async (ctx: ExtensionContext, reinstall = false) => {
-		if (
-			await setupJeff(pi, ctx, {
-				reinstall,
-				beforeRemove: () => stopServer(ctx, "reinstall"),
-			})
-		) {
-			const settings = await readSettings();
-			if (settings.enabled && settings.provider === "jeff")
-				await startServer(ctx, true);
+		if (modelDownload || modelInstalling) {
+			ctx.ui.notify(
+				"Wait for Jeff installation or cancel the running model download before installing Jeff.",
+				"warning",
+			);
+			return;
+		}
+		modelInstalling = true;
+		try {
+			if (
+				await setupJeff(pi, ctx, {
+					reinstall,
+					model: (await readSettings()).jeffModel,
+					downloadModel: (id) => beginDownload(ctx, id, false),
+					beforeRemove: () => stopServer(ctx, "reinstall"),
+				})
+			) {
+				const settings = await readSettings();
+				if (settings.enabled && settings.provider === "jeff")
+					await startServer(ctx, true);
+			}
+		} finally {
+			modelInstalling = false;
 		}
 	};
 	const logs = async (ctx: ExtensionContext, editor: boolean) => {
@@ -987,12 +1116,22 @@ export default function statify(pi: ExtensionAPI): void {
 				if (!(await readKey()) && !(await editKey(provider, ctx))) return;
 			} else {
 				const settings = await readSettings();
+				if (!jeffModelInstalled(settings.jeffModel)) {
+					ctx.ui.notify(
+						`Download ${modelLabel(settings.jeffModel)} first: /statify → Jeff → Models`,
+						"warning",
+					);
+					return;
+				}
 				healthCache.delete(ctx.sessionManager.getSessionId());
 				const server = await health(
 					ctx.sessionManager.getSessionId(),
 					settings.jeffUrl,
 				);
-				if (server.status === "unreachable" && !jeffInstalled()) {
+				if (
+					server.status === "unreachable" &&
+					!jeffInstalled(process.env, settings.jeffModel)
+				) {
 					ctx.ui.notify("Choose Install / update Jeff first.", "warning");
 					return;
 				}
@@ -1159,6 +1298,150 @@ export default function statify(pi: ExtensionAPI): void {
 				return;
 		}
 	};
+	const useModel = async (ctx: ExtensionContext, id: string) => {
+		if (!findJeffModel(id)) throw new Error(`Unknown Jeff model: ${id}`);
+		if (!jeffModelInstalled(id)) {
+			ctx.ui.notify(
+				`Download ${modelLabel(id)} first: /statify → Jeff → Models`,
+				"warning",
+			);
+			return;
+		}
+		const settings = await readSettings();
+		const managed = await jeffServerState().catch(() => ({
+			status: "stopped" as const,
+		}));
+		await saveSettings({ ...settings, jeffModel: id });
+		assistantCache.clear();
+		healthCache.delete(ctx.sessionManager.getSessionId());
+		if (managed.status === "running") await startServer(ctx, true);
+		else if (wanted(settings)) await startServer(ctx);
+		ctx.ui.notify(`Using ${modelLabel(id)}`, "info");
+	};
+	const modelActions = async (
+		ctx: ExtensionContext,
+		id: string,
+		cursor: MenuCursor,
+	): Promise<void> => {
+		const model = findJeffModel(id);
+		if (!model) throw new Error(`Unknown Jeff model: ${id}`);
+		for (;;) {
+			const settings = await readSettings();
+			const installed = jeffModelInstalled(id);
+			const active = settings.jeffModel === id;
+			const items: MenuAction[] = [];
+			if (active)
+				items.push({
+					label: "Active model",
+					description: "Selected for the managed Jeff server",
+					run: async () => undefined,
+				});
+			if (modelDownload || modelInstalling) {
+				items.push(
+					modelDownload?.id === id
+						? {
+								label: "Cancel download",
+								description: "Keep partial files to resume later",
+								run: async () => {
+									const download = modelDownload;
+									if (download?.id !== id) return;
+									download.cancel();
+									await download.done.catch(() => {});
+								},
+							}
+						: {
+								label: "Another download is running",
+								description: modelDownload
+									? modelLabel(modelDownload.id)
+									: "Jeff installation",
+								run: async () => undefined,
+							},
+				);
+			} else {
+				if (!installed)
+					items.push({
+						label: `Download (${modelSize(model.bytes)})`,
+						description:
+							"Download or resume the pinned Hugging Face checkpoint",
+						run: async () => {
+							if (
+								await ctx.ui.confirm(
+									`Download ${model.label}?`,
+									`Downloads ${modelSize(model.bytes)} from Hugging Face (${model.repo} @ ${model.revision.slice(0, 7)}) into ${jeffModelPath(id)}. It runs in the background; the statusline shows progress.`,
+								)
+							)
+								beginDownload(ctx, id);
+						},
+					});
+				else if (!active)
+					items.push({
+						label: "Use this model",
+						description: "Select this model and restart the managed server",
+						run: () => useModel(ctx, id),
+					});
+				if (!active && existsSync(jeffModelPath(id))) {
+					const bytes = await jeffModelDiskBytes(id);
+					items.push({
+						label: installed
+							? `Delete (frees ${modelSize(bytes)})`
+							: `Delete partial files (${modelSize(bytes)})`,
+						description: jeffModelPath(id),
+						run: async () => {
+							if (
+								await ctx.ui.confirm(
+									`Delete ${model.label}${installed ? "" : " partial files"}?`,
+									`Delete only ${jeffModelPath(id)} and free ${modelSize(bytes)}.`,
+								)
+							) {
+								const current = await readSettings();
+								if (current.jeffModel === id || modelDownload)
+									throw new Error(
+										"The active or downloading model cannot be deleted.",
+									);
+								await deleteJeffModel(id);
+								ctx.ui.notify(
+									`${model.label}${installed ? "" : " partial files"} deleted.`,
+									"info",
+								);
+							}
+						},
+					});
+				}
+			}
+			items.push({ label: "Back", description: "Return to Jeff models" });
+			if (!(await selectAction(ctx, model.label, items, cursor))) return;
+		}
+	};
+	const modelsMenu = async (ctx: ExtensionContext): Promise<void> => {
+		const cursor: MenuCursor = { index: 0 };
+		const actionCursors = new Map<string, MenuCursor>();
+		for (;;) {
+			const settings = await readSettings();
+			const progress = await downloadProgress();
+			const items: MenuAction[] = JEFF_MODELS.map((model) => ({
+				label: `${model.label}${settings.jeffModel === model.id ? " ✓" : ""}`,
+				description: `${progress?.id === model.id ? `downloading ${progress.pct}%` : jeffModelInstalled(model.id) ? "downloaded" : "not downloaded"} · ${modelSize(model.bytes)} · ${model.note}`,
+				run: async () => {
+					let actionCursor = actionCursors.get(model.id);
+					if (!actionCursor) {
+						actionCursor = { index: 0 };
+						actionCursors.set(model.id, actionCursor);
+					}
+					await modelActions(ctx, model.id, actionCursor);
+				},
+			}));
+			items.push({ label: "Back", description: "Return to Jeff" });
+			if (
+				!(await selectAction(
+					ctx,
+					`Jeff models · active: ${modelLabel(settings.jeffModel)}`,
+					items,
+					cursor,
+				))
+			)
+				return;
+		}
+	};
 	const connectionMenu = async (ctx: ExtensionContext): Promise<void> => {
 		const cursor: MenuCursor = { index: 0 };
 		for (;;) {
@@ -1191,6 +1474,8 @@ export default function statify(pi: ExtensionAPI): void {
 		const cursor: MenuCursor = { index: 0 };
 		for (;;) {
 			const settings = await readSettings();
+			const progress =
+				provider === "jeff" ? await downloadProgress() : undefined;
 			const keySet = Boolean(
 				await (provider === "jev" ? readKey : readJeffKey)(),
 			);
@@ -1299,6 +1584,13 @@ export default function statify(pi: ExtensionAPI): void {
 								run: () => serversMenu(ctx),
 							},
 							{
+								label: "Models",
+								description: progress
+									? `Downloading ${modelLabel(progress.id)} · ${progress.pct}%`
+									: `Active: ${modelLabel(settings.jeffModel)} · ${JEFF_MODELS.filter((model) => jeffModelInstalled(model.id)).length} of ${JEFF_MODELS.length} downloaded`,
+								run: () => modelsMenu(ctx),
+							},
+							{
 								label: "Logs",
 								description: "Managed server and sanitized installer logs",
 								run: () => logs(ctx, true),
@@ -1309,7 +1601,8 @@ export default function statify(pi: ExtensionAPI): void {
 									"Apple Silicon · pinned local model · managed local server",
 								run: () => install(ctx),
 							},
-							...(server?.status !== "failed" && jeffInstalled()
+							...(server?.status !== "failed" &&
+							existsSync(join(jeffDir(), ".venv"))
 								? [reinstallAction]
 								: []),
 							{
@@ -1382,7 +1675,7 @@ export default function statify(pi: ExtensionAPI): void {
 				if (ctx.mode === "tui") await menu(ctx);
 				else
 					ctx.ui.notify(
-						"Open /statify in interactive OMP for guided setup. Commands: /statify on|off|status|key add|edit|remove|jeff setup|start|stop|restart|logs|servers|jeff-url <url>|random|provider jev|jeff|statusline on|off.",
+						"Open /statify in interactive OMP for guided setup. Commands: /statify on|off|status|key add|edit|remove|jeff setup|start|stop|restart|logs|servers; /statify jeff models; /statify jeff model <id>; /statify jeff download <id>; /statify jeff-url <url>|random; /statify provider jev|jeff; /statify statusline on|off.",
 						"info",
 					);
 				return;
@@ -1398,6 +1691,18 @@ export default function statify(pi: ExtensionAPI): void {
 			if (action === "on") await enableProvider(settings.provider, ctx);
 			else if (action === "off") await disable(ctx);
 			else if (action === "jeff logs") await logs(ctx, false);
+			else if (action === "jeff models")
+				ctx.ui.notify(
+					JEFF_MODELS.map(
+						(model) =>
+							`${model.id} · ${model.label} · ${jeffModelInstalled(model.id) ? "downloaded" : "not downloaded"}${settings.jeffModel === model.id ? " · active" : ""}`,
+					).join("\n"),
+					"info",
+				);
+			else if (action.startsWith("jeff model "))
+				await useModel(ctx, action.slice("jeff model ".length).trim());
+			else if (action.startsWith("jeff download "))
+				beginDownload(ctx, action.slice("jeff download ".length).trim());
 			else if (action === "jeff servers") {
 				const servers = await discoverServers(settings);
 				ctx.ui.notify(
@@ -1461,8 +1766,9 @@ export default function statify(pi: ExtensionAPI): void {
 				);
 				const server = await serverStatus(ctx, current);
 				const paths = jeffServerPaths();
+				const progress = await downloadProgress();
 				ctx.ui.notify(
-					`Statify · ${providerName(current.provider)} · ${await state(ctx, current)}\nKey: ${keySet ? "saved" : current.provider === "jev" ? "needed" : "not set (optional unless server requires auth)"} · mode: ${mode() ?? "invalid"} · statusline: ${current.statusline ? "visible" : "hidden"}\nEndpoint: ${current.jeffUrl} · server: ${server.status}${server.managed.status !== "stopped" ? ` · managed pid ${server.managed.record.pid}` : ""}${server.server.authentication ? " · key required" : ""}\nServer log: ${paths.log}\nSetup log: ${paths.setupLog}`,
+					`Statify · ${providerName(current.provider)} · ${await state(ctx, current)}\nKey: ${keySet ? "saved" : current.provider === "jev" ? "needed" : "not set (optional unless server requires auth)"} · mode: ${mode() ?? "invalid"} · statusline: ${current.statusline ? "visible" : "hidden"}\nModel: ${modelLabel(current.jeffModel)} (${jeffModelInstalled(current.jeffModel) ? "downloaded" : "not downloaded"})${progress ? `\nDownloading ${modelLabel(progress.id)} · ${progress.pct}%` : ""}\nEndpoint: ${current.jeffUrl} · server: ${server.status}${server.managed.status !== "stopped" ? ` · managed pid ${server.managed.record.pid}` : ""}${server.server.authentication ? " · key required" : ""}\nServer log: ${paths.log}\nSetup log: ${paths.setupLog}`,
 					"info",
 				);
 			}
@@ -1478,6 +1784,7 @@ export default function statify(pi: ExtensionAPI): void {
 		handler: command,
 	});
 	pi.on("session_start", async (_event, ctx) => {
+		shuttingDown = false;
 		stats.set(ctx.sessionManager.getSessionId(), { inFlight: 0, saved: 0 });
 		healthCache.delete(ctx.sessionManager.getSessionId());
 		try {
@@ -1486,8 +1793,13 @@ export default function statify(pi: ExtensionAPI): void {
 			if (wanted(settings)) {
 				const { server, managed } = await serverStatus(ctx, settings);
 				if (
+					managed.status === "running" &&
+					(managed.record.model ?? DEFAULT_JEFF_MODEL) !== settings.jeffModel
+				)
+					await startServer(ctx, true, false);
+				else if (
 					server.status === "unreachable" &&
-					jeffInstalled() &&
+					jeffInstalled(process.env, settings.jeffModel) &&
 					managed.status !== "running"
 				)
 					await startServer(ctx, false, false);
@@ -1670,7 +1982,16 @@ export default function statify(pi: ExtensionAPI): void {
 		},
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
+		shuttingDown = true;
+		refreshGeneration++;
 		clearWatcher();
+		try {
+			modelDownload?.cancel();
+			if (downloadTimer) downloadTimer.ctx.clearTimer(downloadTimer.timer);
+			downloadTimer = undefined;
+		} catch {
+			// Download cancellation must never break shutdown.
+		}
 		try {
 			const id = ctx.sessionManager.getSessionId();
 			stats.delete(id);

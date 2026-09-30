@@ -4,6 +4,7 @@ import { once } from "node:events";
 import {
 	chmod,
 	lstat,
+	mkdir,
 	mkdtemp,
 	readFile,
 	rm,
@@ -16,6 +17,7 @@ import {
 	acquireJeffLease,
 	capJeffLog,
 	freePort,
+	jeffInstalled,
 	jeffLogTail,
 	jeffServerPaths,
 	jeffServerState,
@@ -79,7 +81,7 @@ test("a managed server starts once, serves health, and stops its listener", asyn
 		port: Number(process.env.JEFF_PORT),
 		fetch(request) {
 			return new URL(request.url).pathname === "/health"
-				? Response.json({ status: "ready", authentication: false })
+				? Response.json({ status: "ready", authentication: false, model: process.env.JEFF_MODEL_DIR })
 				: new Response("not found", { status: 404 });
 		},
 	});\n`,
@@ -87,10 +89,16 @@ test("a managed server starts once, serves health, and stops its listener", asyn
 	const paths = jeffServerPaths(dir);
 	await writeFile(paths.log, "previous run", { mode: 0o644 });
 	await chmod(dir, 0o755);
-	const options = { dir, url, command: [process.execPath, script] };
+	const options = {
+		dir,
+		url,
+		model: "jeff-2b-v1.1",
+		command: [process.execPath, script],
+	};
 	const started = await startJeffServer(options);
 	expect(started.status).toBe("running");
 	if (started.status !== "running") throw new Error("Server did not start");
+	expect(started.record.model).toBe("jeff-2b-v1.1");
 	await waitUntil(async () => {
 		try {
 			const response = await fetch(`${url}/health`);
@@ -102,6 +110,7 @@ test("a managed server starts once, serves health, and stops its listener", asyn
 	expect(await (await fetch(`${url}/health`)).json()).toEqual({
 		status: "ready",
 		authentication: false,
+		model: "jeff-2b-v1.1",
 	});
 	expect(await jeffServerState(dir)).toEqual(started);
 	expect(JSON.parse(await readFile(paths.record, "utf8"))).toEqual(
@@ -122,6 +131,31 @@ test("a managed server starts once, serves health, and stops its listener", asyn
 	await expect(lstat(paths.record)).rejects.toMatchObject({ code: "ENOENT" });
 	expect(await jeffServerState(dir)).toEqual({ status: "stopped" });
 }, 10000);
+
+test("Jeff installation requires the venv and all selected model files", async () => {
+	const dir = await temporary();
+	const env = { JEFF_DIR: dir };
+	const model = "jeff-2b-v1.1";
+	const modelPath = join(dir, "checkpoints", model);
+	await mkdir(modelPath, { recursive: true });
+	const files = [
+		"config.json",
+		"decision_config.json",
+		"model.safetensors",
+		"readout.safetensors",
+	];
+	for (const file of files) await writeFile(join(modelPath, file), "");
+	expect(jeffInstalled(env, model)).toBe(false);
+	await mkdir(join(dir, ".venv"));
+	expect(jeffInstalled(env, model)).toBe(true);
+	expect(jeffInstalled(env, "jeff-0.8b")).toBe(false);
+	expect(jeffInstalled(env)).toBe(false);
+	for (const file of files) {
+		await rm(join(modelPath, file));
+		expect(jeffInstalled(env, model)).toBe(false);
+		await writeFile(join(modelPath, file), "");
+	}
+});
 
 test("a failed server retains its stderr for diagnosis and removes the stale record on stop", async () => {
 	const dir = await temporary();
