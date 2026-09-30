@@ -34,6 +34,8 @@ Requires an Apple Silicon Mac.
 2. Review the trust prompt before approving downloads. If mise is missing, install it with `brew install mise` and retry.
 3. Choose **Enable Jeff (experimental)** and confirm. Statify starts the local server in the background—no separate terminal needed—and stops it when Jeff is disabled or the last OMP window closes.
 
+> **Use Jeff in one OMP session at a time.** Jeff handles one request at a time. If several OMP windows use it at once, a request that arrives while Jeff is busy with another window is skipped, and that output reaches the AI unshortened. Parallel sessions therefore save much less than you might expect. Use Jev for parallel sessions.
+
 In the Jeff menu you can start, stop, or restart the server, view its logs, and switch to another server or port — for example, when the usual port is already taken.
 
 If the server keeps failing, choose **Reinstall Jeff**: after asking, it downloads Jeff again (about 2 GB). [Jeff setup and troubleshooting](docs/setup.md#jeff-experimental-local-provider).
